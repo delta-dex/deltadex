@@ -1,8 +1,6 @@
 /* eslint-env browser */
 /* eslint no-console: ["error", { allow: ["log"] }] */
 
-const config = require('./config.js');
-const utility = require('./common/utility.js')(config);
 const Web3 = require('web3');
 const request = require('request');
 const async = require('async');
@@ -11,10 +9,14 @@ const sha256 = require('js-sha256').sha256;
 
 function API() {}
 
-API.init = function init(callback, allContracts, path, provider) {
+API.init = function init(callback, allContracts, path, provider, configName, lookbackIn) {
   const self = this;
-  this.config = config;
-  this.utility = utility;
+  if (configName === 'testnet') {
+    this.config = require('./config_testnet.js'); // eslint-disable-line global-require
+  } else {
+    this.config = require('./config.js'); // eslint-disable-line global-require
+  }
+  this.utility = require('./common/utility.js')(this.config); // eslint-disable-line global-require
 
   // web3
   this.web3 = new Web3();
@@ -69,7 +71,7 @@ API.init = function init(callback, allContracts, path, provider) {
     async.series(
       [
         (callbackSeries) => {
-          utility.loadContract(
+          this.utility.loadContract(
             this.web3,
             this.config.contractEtherDelta,
             this.contractEtherDeltaAddrs[0],
@@ -79,7 +81,7 @@ API.init = function init(callback, allContracts, path, provider) {
             });
         },
         (callbackSeries) => {
-          utility.loadContract(this.web3, this.config.contractToken, this.config.ethAddr, (
+          this.utility.loadContract(this.web3, this.config.contractToken, this.config.ethAddr, (
             err,
             contract) => {
             this.contractToken = contract;
@@ -106,7 +108,7 @@ API.init = function init(callback, allContracts, path, provider) {
         (callbackSeries) => {
           API.logs(() => {
             callbackSeries(null, true);
-          });
+          }, lookbackIn);
         },
       ],
       () => {
@@ -120,7 +122,7 @@ API.init = function init(callback, allContracts, path, provider) {
 
 API.readStorage = function readStorage(name, callback) {
   if (typeof window !== 'undefined') {
-    const result = utility.readCookie(name);
+    const result = this.utility.readCookie(name);
     if (result) {
       try {
         const resultObj = JSON.parse(result);
@@ -132,7 +134,7 @@ API.readStorage = function readStorage(name, callback) {
       callback('fail', undefined);
     }
   } else {
-    utility.readFile(name, (err, result) => {
+    this.utility.readFile(name, (err, result) => {
       if (!err) {
         try {
           const resultObj = JSON.parse(result);
@@ -150,10 +152,10 @@ API.readStorage = function readStorage(name, callback) {
 API.writeStorage = function writeStorage(name, obj, callback) {
   const objStr = JSON.stringify(obj);
   if (typeof window !== 'undefined') {
-    utility.createCookie(name, objStr);
+    this.utility.createCookie(name, objStr);
     callback(null, true);
   } else {
-    utility.writeFile(name, objStr, (err) => {
+    this.utility.writeFile(name, objStr, (err) => {
       if (!err) {
         callback(null, true);
       } else {
@@ -163,8 +165,9 @@ API.writeStorage = function writeStorage(name, obj, callback) {
   }
 };
 
-API.logs = function logs(callback) {
-  utility.blockNumber(this.web3, (err, blockNumber) => {
+API.logs = function logs(callback, lookbackIn) {
+  this.utility.blockNumber(this.web3, (err, blockNumber) => {
+    const startBlock = lookbackIn ? blockNumber - lookbackIn : 1848513;
     Object.keys(this.eventsCache).forEach((id) => {
       const event = this.eventsCache[id];
       Object.keys(event.args).forEach((arg) => {
@@ -172,6 +175,7 @@ API.logs = function logs(callback) {
           event.args[arg] = new BigNumber(event.args[arg]);
         }
       });
+      if (event.blockNumber < startBlock) delete this.eventsCache[id]; // delete old events
     });
     async.mapSeries(
       this.contractEtherDeltaAddrs,
@@ -179,7 +183,6 @@ API.logs = function logs(callback) {
         const blocks = Object.values(this.eventsCache)
           .filter(x => x.address === contractEtherDeltaAddr)
           .map(x => x.blockNumber);
-        const startBlock = 1848513;
         const lastBlock = blocks.length ? blocks.max() : startBlock;
         const searches = [];
         const blockInterval = 12500;
@@ -189,7 +192,7 @@ API.logs = function logs(callback) {
         async.mapSeries(
           searches,
           (searchRange, callbackMapSearch) => {
-            utility.logsOnce(
+            this.utility.logsOnce(
               this.web3,
               this.contractEtherDelta,
               contractEtherDeltaAddr,
@@ -257,7 +260,7 @@ API.getCoinMarketCapTicker = function getCoinMarketCapTicker(callback) {
 };
 
 API.getBalance = function getBalance(addr, callback) {
-  utility.getBalance(this.web3, addr, (err, balance) => {
+  this.utility.getBalance(this.web3, addr, (err, balance) => {
     if (!err) {
       callback(null, balance);
     } else {
@@ -269,7 +272,7 @@ API.getBalance = function getBalance(addr, callback) {
 API.getEtherDeltaBalance = function getEtherDeltaBalance(addr, callback) {
   if (addr.length === 42) {
     const token = '0x0000000000000000000000000000000000000000'; // ether token
-    utility.call(
+    this.utility.call(
       this.web3,
       this.contractEtherDelta,
       this.contractEtherDeltaAddrs[0],
@@ -293,7 +296,7 @@ API.getEtherDeltaTokenBalances = function getEtherDeltaTokenBalances(addr, callb
       this.config.tokens,
       {},
       (memo, token, callbackReduce) => {
-        utility.call(
+        this.utility.call(
           this.web3,
           this.contractEtherDelta,
           this.contractEtherDeltaAddrs[0],
@@ -329,7 +332,7 @@ API.getTokenBalances = function getTokenBalances(addr, callback) {
             callbackReduce(null, memo);
           });
         } else {
-          utility.call(this.web3, this.contractToken, token.addr, 'balanceOf', [addr], (
+          this.utility.call(this.web3, this.contractToken, token.addr, 'balanceOf', [addr], (
             err,
             result) => {
             if (!err) {
@@ -462,9 +465,9 @@ API.getTokenByAddr = function getTokenByAddr(addr, callback) {
   } else if (addr.slice(0, 2) === '0x') {
     token = JSON.parse(JSON.stringify(this.config.tokens[0]));
     token.addr = addr;
-    utility.call(this.web3, this.contractToken, token.addr, 'decimals', [], (errDecimals, resultDecimals) => {
+    this.utility.call(this.web3, this.contractToken, token.addr, 'decimals', [], (errDecimals, resultDecimals) => {
       if (!errDecimals && resultDecimals >= 0) token.decimals = resultDecimals.toNumber();
-      utility.call(this.web3, this.contractToken, token.addr, 'name', [], (errName, resultName) => {
+      this.utility.call(this.web3, this.contractToken, token.addr, 'name', [], (errName, resultName) => {
         if (!errName && resultName) {
           token.name = resultName;
         } else {
@@ -654,7 +657,7 @@ API.updateOrder = function updateOrder(orderIn, callback) {
           });
         },
         () => {
-          utility.call(
+          this.utility.call(
             this.web3,
             this.contractEtherDelta,
             this.contractEtherDeltaAddrs[0],
@@ -675,32 +678,40 @@ API.updateOrder = function updateOrder(orderIn, callback) {
               if (!errAvail) {
                 const availableVolume = resultAvail;
                 if (order.amount >= 0) {
+                  order.price = new BigNumber(order.order.amountGive)
+                    .div(new BigNumber(order.order.amountGet))
+                    .mul(API.getDivisor(order.order.tokenGet))
+                    .div(API.getDivisor(order.order.tokenGive));
                   order.availableVolume = availableVolume;
-                  order.ethAvailableVolume = utility.weiToEth(
+                  order.ethAvailableVolume = this.utility.weiToEth(
                     Math.abs(order.availableVolume),
                     API.getDivisor(order.order.tokenGet));
                   order.availableVolumeBase = Math.abs(availableVolume
                     .mul(order.price)
                     .mul(API.getDivisor(order.order.tokenGive))
                     .div(API.getDivisor(order.order.tokenGet)));
-                  order.ethAvailableVolumeBase = utility.weiToEth(order.availableVolumeBase,
+                  order.ethAvailableVolumeBase = this.utility.weiToEth(order.availableVolumeBase,
                     API.getDivisor(order.order.tokenGive));
                 } else {
+                  order.price = new BigNumber(order.order.amountGet)
+                    .div(new BigNumber(order.order.amountGive))
+                    .mul(API.getDivisor(order.order.tokenGive))
+                    .div(API.getDivisor(order.order.tokenGet));
                   order.availableVolume = availableVolume
                     .div(order.price)
                     .mul(API.getDivisor(order.order.tokenGive))
                     .div(API.getDivisor(order.order.tokenGet));
-                  order.ethAvailableVolume = utility.weiToEth(
+                  order.ethAvailableVolume = this.utility.weiToEth(
                     Math.abs(order.availableVolume),
                     API.getDivisor(order.order.tokenGive));
                   order.availableVolumeBase = Math.abs(availableVolume);
-                  order.ethAvailableVolumeBase = utility.weiToEth(
+                  order.ethAvailableVolumeBase = this.utility.weiToEth(
                     order.availableVolumeBase,
                     API.getDivisor(order.order.tokenGet));
                 }
                 if (Number(order.ethAvailableVolume).toFixed(3) >= this.minOrderSize &&
                 Number(order.ethAvailableVolumeBase).toFixed(3) >= this.minOrderSize) {
-                  utility.call(
+                  this.utility.call(
                     this.web3,
                     this.contractEtherDelta,
                     this.contractEtherDeltaAddrs[0],
@@ -735,14 +746,12 @@ API.updateOrder = function updateOrder(orderIn, callback) {
                           callback('Order is filled', undefined);
                         }
                       } else {
-                        // if there's an error, assume the order is ok and try again later
                         callback(null, order);
                       }
                     });
                 } else if (!order.updated) {
-                  // if the available volume is too low,
-                  // but this is the first attempt, try again later
-                  callback(null, order);
+                  // may want to not count this as an error and try again
+                  callback('Volume too low', undefined);
                 } else {
                   callback('Volume too low', undefined);
                 }
@@ -758,20 +767,6 @@ API.updateOrder = function updateOrder(orderIn, callback) {
   });
 };
 
-/*
-sell EDG/ETH, tokenGive: EDG, tokenGet: ETH 0.23
-  buy: amount +, price: 1/0.23
-  sell: amount -, price: 0.23
-sell EDG/ETH, tokenGive: EDG, tokenGet: ETH 0.20
-  buy: amount +, price: 1/0.20
-  sell: amount -, price: 0.20
-buy EDG/ETH, tokenGive: ETH, tokenGet: EDG 0.15
-  buy: amount +, price: 0.15
-  sell: amount -, price/0.15
-buy EDG/ETH, tokenGive: ETH, tokenGet: EDG 0.12
-  buy: amount +, price: 0.12
-  sell: amount -, price/0.12
-*/
 API.getTopOrders = function getTopOrders() {
   const buys = {};
   const sells = {};
@@ -779,17 +774,20 @@ API.getTopOrders = function getTopOrders() {
     const order = API.ordersCache[key];
     const keyKind = key.split('_')[1];
     const tokenPair = `${order.order.tokenGive}/${order.order.tokenGet}_${keyKind}`;
-    if (keyKind === 'buy') {
-      if (!buys[tokenPair]) {
-        buys[tokenPair] = order;
-      } else if (Number(order.price) > Number(buys[tokenPair].price)) {
-        buys[tokenPair] = order;
-      }
-    } else if (keyKind === 'sell') {
-      if (!sells[tokenPair]) {
-        sells[tokenPair] = order;
-      } else if (Number(order.price) < Number(sells[tokenPair].price)) {
-        sells[tokenPair] = order;
+    if (Number(order.ethAvailableVolume).toFixed(3) >= this.minOrderSize &&
+    Number(order.ethAvailableVolumeBase).toFixed(3) >= this.minOrderSize) {
+      if (keyKind === 'buy') {
+        if (!buys[tokenPair]) {
+          buys[tokenPair] = order;
+        } else if (Number(order.price) > Number(buys[tokenPair].price)) {
+          buys[tokenPair] = order;
+        }
+      } else if (keyKind === 'sell') {
+        if (!sells[tokenPair]) {
+          sells[tokenPair] = order;
+        } else if (Number(order.price) < Number(sells[tokenPair].price)) {
+          sells[tokenPair] = order;
+        }
       }
     }
   });
@@ -797,20 +795,47 @@ API.getTopOrders = function getTopOrders() {
   return orders;
 };
 
-API.getOrdersByPair = function getOrdersByPair(tokenA, tokenB) {
+API.getOrdersByPair = function getOrdersByPair(tokenA, tokenB, n) {
   const orders = [];
   Object.keys(API.ordersCache).forEach((key) => {
     const order = API.ordersCache[key];
-    if ((order.order.tokenGive === tokenA && order.order.tokenGet === tokenB)
-    || (order.order.tokenGive === tokenB && order.order.tokenGet === tokenA)) {
+    if (((order.order.tokenGive.toLowerCase() === tokenA.toLowerCase() &&
+    order.order.tokenGet.toLowerCase() === tokenB.toLowerCase())
+    || (order.order.tokenGive.toLowerCase() === tokenB.toLowerCase() &&
+    order.order.tokenGet.toLowerCase() === tokenA.toLowerCase())) &&
+    Number(order.ethAvailableVolume).toFixed(3) >= this.minOrderSize &&
+    Number(order.ethAvailableVolumeBase).toFixed(3) >= this.minOrderSize) {
       orders.push(order);
     }
   });
+  if (n) {
+    const topNOrders = [];
+    const buys = [];
+    const sells = [];
+    orders.forEach((order) => {
+      if (order.amount > 0 && order.order.tokenGive === tokenB &&
+      order.order.tokenGet === tokenA) {
+        buys.push(order);
+      } else if (order.amount < 0 && order.order.tokenGive === tokenA &&
+      order.order.tokenGet === tokenB) {
+        sells.push(order);
+      }
+    });
+    sells.sort((a, b) => a.price - b.price || a.id - b.id);
+    buys.sort((a, b) => b.price - a.price || a.id - b.id);
+    buys.slice(0, n).forEach((order) => {
+      topNOrders.push(order);
+    });
+    sells.slice(0, n).forEach((order) => {
+      topNOrders.push(order);
+    });
+    return topNOrders;
+  }
   return orders;
 };
 
 API.getOrdersRemote = function getOrdersRemote(callback) {
-  utility.getURL(`${this.config.apiServer}/orders`, (err, result) => {
+  this.utility.getURL(`${this.config.apiServer}/orders`, (err, result) => {
     if (!err) {
       const data = JSON.parse(result);
       let orders;
@@ -854,7 +879,7 @@ API.blockTime = function blockTime(block) {
 
 API.getBlockNumber = function getBlockNumber(callback) {
   if (!this.blockTimeSnapshot || new Date() - this.blockTimeSnapshot.date > 14 * 1000) {
-    utility.blockNumber(this.web3, (err, blockNumber) => {
+    this.utility.blockNumber(this.web3, (err, blockNumber) => {
       this.blockTimeSnapshot = { blockNumber, date: new Date() };
       callback(null, this.blockTimeSnapshot.blockNumber);
     });
@@ -881,7 +906,7 @@ API.getTrades = function getTrades(callback) {
             .div(API.getDivisor(event.args.tokenGive)),
           id: (event.blockNumber * 1000) + event.transactionIndex,
           blockNumber: event.blockNumber,
-          date: new Date(utility.hexToDec(event.timeStamp) * 1000),
+          date: new Date(this.utility.hexToDec(event.timeStamp) * 1000),
           buyer: event.args.get,
           seller: event.args.give,
         });
@@ -896,7 +921,7 @@ API.getTrades = function getTrades(callback) {
             .div(API.getDivisor(event.args.tokenGet)),
           id: (event.blockNumber * 1000) + event.transactionIndex,
           blockNumber: event.blockNumber,
-          date: new Date(utility.hexToDec(event.timeStamp) * 1000),
+          date: new Date(this.utility.hexToDec(event.timeStamp) * 1000),
           buyer: event.args.give,
           seller: event.args.get,
         });
@@ -922,7 +947,7 @@ API.getFees = function getFees(callback) {
           amount: event.args.amountGive.times(feeTake),
           id: (event.blockNumber * 1000) + event.transactionIndex,
           blockNumber: event.blockNumber,
-          date: new Date(utility.hexToDec(event.timeStamp) * 1000),
+          date: new Date(this.utility.hexToDec(event.timeStamp) * 1000),
         });
         // make fee
         fees.push({
@@ -930,7 +955,7 @@ API.getFees = function getFees(callback) {
           amount: event.args.amountGet.times(feeMake),
           id: (event.blockNumber * 1000) + event.transactionIndex,
           blockNumber: event.blockNumber,
-          date: new Date(utility.hexToDec(event.timeStamp) * 1000),
+          date: new Date(this.utility.hexToDec(event.timeStamp) * 1000),
         });
       }
     }
@@ -951,14 +976,14 @@ API.getVolumes = function getVolumes(callback) {
           amount: event.args.amountGive,
           id: (event.blockNumber * 1000) + event.transactionIndex,
           blockNumber: event.blockNumber,
-          date: new Date(utility.hexToDec(event.timeStamp) * 1000),
+          date: new Date(this.utility.hexToDec(event.timeStamp) * 1000),
         });
         volumes.push({
           token: API.getToken(event.args.tokenGet),
           amount: event.args.amountGet,
           id: (event.blockNumber * 1000) + event.transactionIndex,
           blockNumber: event.blockNumber,
-          date: new Date(utility.hexToDec(event.timeStamp) * 1000),
+          date: new Date(this.utility.hexToDec(event.timeStamp) * 1000),
         });
       }
     }
@@ -980,7 +1005,7 @@ API.getDepositsWithdrawals = function getDepositsWithdrawals(callback) {
           token,
           id: (event.blockNumber * 1000) + event.transactionIndex,
           blockNumber: event.blockNumber,
-          date: new Date(utility.hexToDec(event.timeStamp) * 1000),
+          date: new Date(this.utility.hexToDec(event.timeStamp) * 1000),
         });
       }
     } else if (
@@ -994,7 +1019,7 @@ API.getDepositsWithdrawals = function getDepositsWithdrawals(callback) {
           token,
           id: (event.blockNumber * 1000) + event.transactionIndex,
           blockNumber: event.blockNumber,
-          date: new Date(utility.hexToDec(event.timeStamp) * 1000),
+          date: new Date(this.utility.hexToDec(event.timeStamp) * 1000),
         });
       }
     }
@@ -1006,16 +1031,45 @@ API.getDepositsWithdrawals = function getDepositsWithdrawals(callback) {
 API.returnTicker = function returnTicker(callback) {
   const tickers = {};
   const firstOldPrices = {};
+  const topOrders = API.getTopOrders();
   API.getTrades((err, result) => {
     const trades = result.trades;
     trades.sort((a, b) => a.blockNumber - b.blockNumber);
     trades.forEach((trade) => {
       if (trade.token && trade.base && trade.base.name === 'ETH') {
         const pair = `${trade.base.name}_${trade.token.name}`;
+        const { token, base } = trade;
         if (!tickers[pair]) {
-          tickers[pair] = { last: undefined, percentChange: 0, baseVolume: 0, quoteVolume: 0 };
+          let ordersFiltered = topOrders.filter(
+            x =>
+            (x.order.tokenGet.toLowerCase() === token.addr.toLowerCase() &&
+            x.order.tokenGive.toLowerCase() === base.addr.toLowerCase() && x.amount > 0) ||
+            (x.order.tokenGive.toLowerCase() === token.addr.toLowerCase() &&
+            x.order.tokenGet.toLowerCase() === base.addr.toLowerCase() && x.amount < 0));
+          // remove orders below the min order limit
+          ordersFiltered = ordersFiltered.filter(order =>
+            Number(order.ethAvailableVolume).toFixed(3) >= this.minOrderSize &&
+            Number(order.ethAvailableVolumeBase).toFixed(3) >= this.minOrderSize);
+          // filter only orders that match the smart contract address
+          ordersFiltered = ordersFiltered.filter(
+            order => order.order.contractAddr === this.config.contractEtherDeltaAddrs[0].addr);
+          // final order filtering and sorting
+          const buyOrders = ordersFiltered.filter(x => x.amount > 0);
+          const sellOrders = ordersFiltered.filter(x => x.amount < 0);
+          sellOrders.sort((a, b) => b.price - a.price || b.id - a.id);
+          buyOrders.sort((a, b) => b.price - a.price || a.id - b.id);
+          const bid = buyOrders.length > 0 ? buyOrders[0].price : undefined;
+          const ask = sellOrders.length > 0 ? sellOrders[sellOrders.length - 1].price : undefined;
+          tickers[pair] = {
+            last: undefined,
+            percentChange: 0,
+            baseVolume: 0,
+            quoteVolume: 0,
+            bid,
+            ask,
+          };
         }
-        const tradeTime = API.blockTime(trade.blockNumber);
+        const tradeTime = trade.date;
         const price = Number(trade.price);
         tickers[pair].last = price;
         if (!firstOldPrices[pair]) firstOldPrices[pair] = price;
@@ -1055,17 +1109,17 @@ API.publishOrder = function publishOrder(
   if (direction === 'buy') {
     tokenGet = tokenAddr;
     tokenGive = baseAddr;
-    amountGet = utility.ethToWei(amount, API.getDivisor(tokenGet));
-    amountGive = utility.ethToWei(amount * price, API.getDivisor(tokenGive));
+    amountGet = this.utility.ethToWei(amount, API.getDivisor(tokenGet));
+    amountGive = this.utility.ethToWei(amount * price, API.getDivisor(tokenGive));
   } else if (direction === 'sell') {
     tokenGet = baseAddr;
     tokenGive = tokenAddr;
-    amountGet = utility.ethToWei(amount * price, API.getDivisor(tokenGet));
-    amountGive = utility.ethToWei(amount, API.getDivisor(tokenGive));
+    amountGet = this.utility.ethToWei(amount * price, API.getDivisor(tokenGet));
+    amountGive = this.utility.ethToWei(amount, API.getDivisor(tokenGive));
   } else {
     return;
   }
-  utility.call(
+  this.utility.call(
     this.web3,
     this.contractEtherDelta,
     this.contractEtherDeltaAddrs[0],
@@ -1077,7 +1131,7 @@ API.publishOrder = function publishOrder(
         callback('You do not have enough funds to send this order.', false);
       } else if (!this.config.ordersOnchain) {
           // offchain order
-        const condensed = utility.pack(
+        const condensed = this.utility.pack(
           [
             this.contractEtherDeltaAddrs[0],
             tokenGet,
@@ -1089,7 +1143,7 @@ API.publishOrder = function publishOrder(
           ],
             [160, 160, 256, 160, 256, 256, 256]);
         const hash = sha256(new Buffer(condensed, 'hex'));
-        utility.sign(this.web3, addr, hash, pk, (errSign, sig) => {
+        this.utility.sign(this.web3, addr, hash, pk, (errSign, sig) => {
           if (errSign) {
             callback(`Could not sign order because of an error: ${err}`, false);
           } else {
@@ -1107,7 +1161,7 @@ API.publishOrder = function publishOrder(
               s: sig.s,
               user: addr,
             };
-            utility.postURL(
+            this.utility.postURL(
                 `${this.config.apiServer}/message`,
                 { message: JSON.stringify(order) },
                 (errPost) => {
@@ -1164,8 +1218,8 @@ API.publishOrders = function publishOrders(
     async.eachSeries(
       orders,
       (order, callbackEach) => {
-        const amount = utility.weiToEth(Math.abs(order.volume), API.getDivisor(token.addr));
-        const orderNonce = utility.getRandomInt(0,
+        const amount = this.utility.weiToEth(Math.abs(order.volume), API.getDivisor(token.addr));
+        const orderNonce = this.utility.getRandomInt(0,
           Math.pow(2, 32)); // eslint-disable-line no-restricted-properties
         if (armed) {
           API.publishOrder(
@@ -1226,7 +1280,7 @@ API.publishOrders = function publishOrders(
 API.formatOrder = function formatOrder(order, token, base) {
   if (order.amount >= 0) {
     return (
-      `${utility.weiToEth(order.availableVolume, API.getDivisor(token.addr))
+      `${this.utility.weiToEth(order.availableVolume, API.getDivisor(token.addr))
       } ${
       token.name
       } @ ${
@@ -1238,7 +1292,7 @@ API.formatOrder = function formatOrder(order, token, base) {
     );
   }
   return (
-      `${utility.weiToEth(order.availableVolume, API.getDivisor(token.addr))
+      `${this.utility.weiToEth(order.availableVolume, API.getDivisor(token.addr))
       } ${
       token.name
       } @ ${

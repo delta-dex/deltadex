@@ -41,8 +41,9 @@
             <li class="dropdown" id="basesDropdown"></li>
           </ul>
           <ul class="nav navbar-nav navbar-right">
-            <li class="dropdown" id="tokenGuidesDropdown"></li>
+            <li class="chat-button"><a href="javascript:;" class="js-gitter-toggle-chat-button">Chat</a></li>
             <li class="dropdown" id="helpDropdown"></li>
+            <li class="dropdown" id="tokenGuidesDropdown"></li>
             <li class="dropdown" id="connection"></li>
             <li class="dropdown" id="languages"></li>
             <li class="dropdown" id="addresses"></li>
@@ -83,7 +84,6 @@
                 <tr>
                   <th class="trn">pair</th>
                   <th class="trn align-right">daily</th>
-                  <th class="trn align-right">weekly</th>
                   <th class="align-right"><span class="trn">bid</span></th>
                   <th class="align-right padding-right"><span class="trn">offer</span></th>
                 </tr>
@@ -320,6 +320,30 @@
       </div>
     </div>
 
+    <!-- Gas price -->
+    <div class="modal fade" id="gasPriceModal" tabindex="-1" role="dialog">
+      <div class="modal-dialog modal-sm" role="document">
+        <div class="modal-content">
+          <div class="modal-header">
+            <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+            <h4 class="modal-title trn">gas_price</h4>
+          </div>
+          <div class="modal-body">
+            <form>
+              <div class="form-group">
+                <label for="gasPrice" class="trn">gas_price_gwei</label>
+                <input type="text" class="form-control" id="gasPrice" />
+              </div>
+            </form>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-default trn" data-dismiss="modal">cancel</button>
+            <button type="button" class="btn btn-primary trn" id="gasPriceSubmit">set_gas_price</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Token -->
     <div class="modal fade" id="tokenModal" tabindex="-1" role="dialog">
       <div class="modal-dialog" role="document">
@@ -378,7 +402,8 @@
     </script>
     <script>
       ((window.gitter = {}).chat = {}).options = {
-        room: 'etherdelta/etherdelta.github.io'
+        room: 'etherdelta/etherdelta.github.io',
+        activationElement: false
       };
     </script>
     <script src="/js/sidecar.v1.js" async defer></script>

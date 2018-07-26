@@ -2,7 +2,23 @@
 /* global $, alertify, ga, EJS, google, web3 */
 /* eslint no-console: ["error", { allow: ["log"] }] */
 
-const config = require('./config.js');
+const getParameterByName = (nameIn, urlIn) => {
+  const url = urlIn || window.location.href;
+  const name = nameIn.replace(/[\[\]]/g, '\\$&'); // eslint-disable-line no-useless-escape
+  const regex = new RegExp(`[?&]${name}(=([^&#]*)|&|#|$)`);
+  const results = regex.exec(url);
+  if (!results) return null;
+  if (!results[2]) return '';
+  return decodeURIComponent(results[2].replace(/\+/g, ' '));
+};
+
+const configName = getParameterByName('config');
+let config;
+if (configName === 'testnet') {
+  config = require('./config_testnet.js'); // eslint-disable-line global-require
+} else {
+  config = require('./config.js'); // eslint-disable-line global-require
+}
 const Web3 = require('web3');
 const utility = require('./common/utility.js')(config);
 const sha256 = require('js-sha256').sha256;
@@ -17,6 +33,7 @@ function EtherDelta() {
   }, 1);
   this.addrs = undefined;
   this.pks = undefined;
+  this.addrKinds = {};
   this.selectedAccount = 0;
   this.selectedToken = undefined;
   this.selectedBase = undefined;
@@ -34,16 +51,20 @@ function EtherDelta() {
   this.language = 'en';
   this.minOrderSize = 0.01;
   this.messageToSend = undefined;
-  this.blockTimeSnapshot = { blockNumber: 3154928, date: new Date('Feb-10-2017 01:40:47') }; // default snapshot
   this.translator = undefined;
-  this.secondsPerBlock = 14;
+  this.secondsPerBlock = 15;
   this.usersWithOrdersToUpdate = {};
   this.apiServerNonce = undefined;
   this.ordersResultByPair = { orders: [], blockNumber: 0 };
   this.topOrdersResult = { orders: [], blockNumber: 0 };
   this.selectedContract = undefined;
+  this.returnTicker = {};
   this.web3 = undefined;
-  this.startEtherDelta();
+  this.daysOfData = 7;
+  this.minGas = 0.005;
+  window.addEventListener('load', () => {
+    this.startEtherDelta();
+  });
 }
 EtherDelta.prototype.ejs = function ejs(url, element, data) {
   if ($(`#${element}`).length) {
@@ -53,39 +74,41 @@ EtherDelta.prototype.ejs = function ejs(url, element, data) {
     console.log(`Failed to render template because ${element} does not exist.`);
   }
 };
-EtherDelta.prototype.alertInfo = function alertInfo(message) {
+if (!alertify.dialogError) {
+  alertify.dialog('dialogError', function factory() { // eslint-disable-line prefer-arrow-callback
+    const header = '<span class="fa fa-times-circle fa-2x" style="vertical-align: middle; color: #ff0000;"></span> Error';
+    return {
+      build() {
+        this.setHeader(header);
+      },
+    };
+  }, true, 'alert');
+}
+if (!alertify.dialogInfo) {
+  alertify.dialog('dialogInfo', function factory() { // eslint-disable-line prefer-arrow-callback
+    const header = '<span class="fa fa-info-circle fa-2x" style="vertical-align: middle; color: #0000ff;"></span>';
+    return {
+      build() {
+        this.setHeader(header);
+      },
+    };
+  }, true, 'alert');
+}
+EtherDelta.prototype.dialogInfo = function dialogInfo(message) {
   console.log(message);
-  alertify.message(message);
+  alertify.dialogInfo(message);
   ga('send', {
     hitType: 'event',
-    eventCategory: 'Alert',
+    eventCategory: 'Dialog',
     eventAction: 'Info',
   });
 };
-EtherDelta.prototype.alertDialog = function alertDialog(message) {
+EtherDelta.prototype.dialogError = function dialogError(message) {
   console.log(message);
-  alertify.alert('Alert', message, () => {});
+  alertify.dialogError(message);
   ga('send', {
     hitType: 'event',
-    eventCategory: 'Alert',
-    eventAction: 'Dialog',
-  });
-};
-EtherDelta.prototype.alertWarning = function alertWarning(message) {
-  console.log(message);
-  alertify.warning(message);
-  ga('send', {
-    hitType: 'event',
-    eventCategory: 'Alert',
-    eventAction: 'Warning',
-  });
-};
-EtherDelta.prototype.alertError = function alertError(message) {
-  console.log(message);
-  alertify.alert('Error', message, () => {});
-  ga('send', {
-    hitType: 'event',
-    eventCategory: 'Alert',
+    eventCategory: 'Dialog',
     eventAction: 'Error',
   });
 };
@@ -102,60 +125,46 @@ EtherDelta.prototype.txError = function txError(err) {
   console.log('Error', err);
   utility.getBalance(this.web3, this.addrs[this.selectedAccount], (errBalance, resultBalance) => {
     const balance = utility.weiToEth(resultBalance);
-    if (this.connection.connection === 'RPC') {
-      if (balance < 0.005) {
-        this.alertError(
-          `You tried to send an Ethereum transaction but there was an error. Your wallet's ETH balance (${balance} ETH) is not enough to cover the gas cost (Ethereum network fee). EtherDelta sends 0.005 ETH with each transaction. This is an overestimate and the excess will get refunded to you. It's a good idea to send more than 0.005 so you can pay for not only this transaction, but also future transactions you do on EtherDelta. The gas has to come directly from your Wallet (EtherDelta has no physical way of paying gas from your deposited ETH).`);
+    if (this.connection.connection === 'RPC' && this.addrKinds[this.selectedAccount] !== 'MetaMask') {
+      if (this.pks[this.selectedAccount]) {
+        this.dialogError('You are using an EtherDelta account that has a private key attached, but you\'re connected to MetaMask. You should disable MetaMask from Chrome\'s Window -> Extensions menu (don\'t worry, this won\'t lose your MetaMask data), then refresh EtherDelta.');
         ga('send', {
           hitType: 'event',
           eventCategory: 'Error',
           eventAction: 'Ethereum - transaction error',
         });
       } else {
-        this.alertError(
-          'You tried to send an Ethereum transaction but there was an error. Make sure the account you have selected in the account dropdown (upper right) matches the one you have selected in MetaMask.');
+        this.dialogError('You are connected to MetaMask, but you are either using a non-MetaMask account, or you are not logged into the MetaMask account you have selected. Check this in MetaMask, then refresh and try again.');
         ga('send', {
           hitType: 'event',
           eventCategory: 'Error',
           eventAction: 'Ethereum - transaction error',
         });
       }
-    } else if (this.connection.connection === 'Proxy') {
-      if (this.pks[this.selectedAccount] &&
-      !utility.verifyPrivateKey(this.addrs[this.selectedAccount], this.pks[this.selectedAccount])) {
-        this.alertError('You tried to send an Ethereum transaction but there was an error. The private key for your account is invalid. Please re-import your account with a valid private key and try again.');
-        ga('send', {
-          hitType: 'event',
-          eventCategory: 'Error',
-          eventAction: 'Ethereum - transaction error',
-        });
-      } else if (!this.pks[this.selectedAccount]) {
-        this.alertError('You tried to send an Ethereum transaction but there was an error. Your account has no private key. Please re-import your account with a valid private key and try again.');
-        ga('send', {
-          hitType: 'event',
-          eventCategory: 'Error',
-          eventAction: 'Ethereum - transaction error',
-        });
-      } else if (balance < 0.005) {
-        this.alertError(
-          `You tried to send an Ethereum transaction but there was an error. Your wallet's ETH balance (${balance} ETH) is not enough to cover the gas cost (Ethereum network fee). EtherDelta sends 0.005 ETH with each transaction. This is an overestimate and the excess will get refunded to you. It's a good idea to send more than 0.005 so you can pay for not only this transaction, but also future transactions you do on EtherDelta. The gas has to come directly from your Wallet (EtherDelta has no physical way of paying gas from your deposited ETH).`);
-        ga('send', {
-          hitType: 'event',
-          eventCategory: 'Error',
-          eventAction: 'Ethereum - transaction error',
-        });
-      } else {
-        this.alertError(
-          "You tried to send an Ethereum transaction but there was an error. Make sure you have enough ETH in your wallet to cover the gas cost (Ethereum network fee). EtherDelta sends 0.005 ETH with each transaction. This is an overestimate and the excess will get refunded to you. It's a good idea to send more than 0.005 so you can pay for not only this transaction, but also future transactions you do on EtherDelta. The gas has to come directly from your Wallet (EtherDelta has no physical way of paying gas from your deposited ETH).");
-        ga('send', {
-          hitType: 'event',
-          eventCategory: 'Error',
-          eventAction: 'Ethereum - transaction error',
-        });
-      }
+    } else if (this.connection.connection === 'Proxy' && !this.pks[this.selectedAccount]) {
+      this.dialogError('You are using an EtherDelta account that doesn\'t have a private key attached. Perhaps you created the account using MetaMask, in which case you should make sure MetaMask is enabled and logged in to this account, then refresh EtherDelta. Or, if you have the private key, you can choose "Import account" from the accounts dropdown (upper right) to re-import the account with its private key.');
+      ga('send', {
+        hitType: 'event',
+        eventCategory: 'Error',
+        eventAction: 'Ethereum - transaction error',
+      });
+    } else if (this.connection.connection === 'Proxy' && !utility.verifyPrivateKey(this.addrs[this.selectedAccount], this.pks[this.selectedAccount])) {
+      this.dialogError('You are using an EtherDelta account that has an invalid private key.');
+      ga('send', {
+        hitType: 'event',
+        eventCategory: 'Error',
+        eventAction: 'Ethereum - transaction error',
+      });
+    } else if (this.connection.connection === 'Proxy' && balance < 2 * this.minGas) {
+      this.dialogError(
+        `Your wallet's ETH balance (${balance} ETH) is not enough to cover the gas cost (Ethereum network fee). EtherDelta sends ${this.minGas} ETH with each transaction. This is an overestimate and the excess will get refunded to you. It's a good idea to send more than ${this.minGas} so you can pay for not only this transaction, but also future transactions you do on EtherDelta. The gas has to come directly from your Wallet (EtherDelta has no physical way of paying gas from your deposited ETH).`);
+      ga('send', {
+        hitType: 'event',
+        eventCategory: 'Error',
+        eventAction: 'Ethereum - transaction error',
+      });
     } else {
-      this.alertError(
-        "You tried to send an Ethereum transaction but there was an error. Make sure you have enough ETH in your wallet to cover the gas cost (Ethereum network fee). EtherDelta sends 0.005 ETH with each transaction. This is an overestimate and the excess will get refunded to you. It's a good idea to send more than 0.005 so you can pay for not only this transaction, but also future transactions you do on EtherDelta. The gas has to come directly from your Wallet (EtherDelta has no physical way of paying gas from your deposited ETH).");
+      this.dialogError('You tried to send an Ethereum transaction but there was an error.');
       ga('send', {
         hitType: 'event',
         eventCategory: 'Error',
@@ -175,8 +184,8 @@ EtherDelta.prototype.alertTxResult = function alertTxResult(err, txsIn) {
         tx.txHash &&
         tx.txHash !== '0x0000000000000000000000000000000000000000000000000000000000000000'
       ) {
-        this.alertDialog(
-          `You just created an Ethereum transaction. Track its progress: <a href="http://${this.config.ethTestnet ? 'testnet.' : ''}etherscan.io/tx/${tx.txHash}" target="_blank">${tx.txHash}</a>.`);
+        this.dialogInfo(
+          `You just created an Ethereum transaction. Track its progress: <a href="https://${this.config.ethTestnet ? `${this.config.ethTestnet}.` : ''}etherscan.io/tx/${tx.txHash}" target="_blank">${tx.txHash}</a>.`);
       } else {
         this.txError();
       }
@@ -184,9 +193,9 @@ EtherDelta.prototype.alertTxResult = function alertTxResult(err, txsIn) {
       if (txs.findIndex(x => !x.txHash) < 0) {
         let message = 'You just created Ethereum transactions. Track their progress: <br />';
         txs.forEach((tx) => {
-          message += `<a href="http://${this.config.ethTestnet ? 'testnet.' : ''}etherscan.io/tx/${tx.txHash}" target="_blank">${tx.txHash}</a><br />`;
+          message += `<a href="https://${this.config.ethTestnet ? `${this.config.ethTestnet}.` : ''}etherscan.io/tx/${tx.txHash}" target="_blank">${tx.txHash}</a><br />`;
         });
-        this.alertDialog(message);
+        this.dialogInfo(message);
       } else {
         this.txError();
       }
@@ -202,24 +211,12 @@ EtherDelta.prototype.enableTooltipsAndPopovers = function enableTooltipsAndPopov
   $('[data-toggle="popover"]').popover({ trigger: 'hover' });
   $('[data-toggle="tooltip"]').tooltip();
 };
-EtherDelta.prototype.logout = function logout() {
-  this.addrs = [this.config.ethAddr];
-  this.pks = [this.config.ethAddrPrivateKey];
-  this.selectedAccount = 0;
-  this.nonce = undefined;
-  this.refresh(() => {}, true, true);
-  ga('send', {
-    hitType: 'event',
-    eventCategory: 'Action',
-    eventAction: 'Logout',
-  });
-};
 EtherDelta.prototype.createAccount = function createAccount() {
   const newAccount = utility.createAccount();
   const addr = newAccount.address;
   const pk = newAccount.privateKey;
   this.addAccount(addr, pk);
-  this.alertDialog(
+  this.dialogInfo(
     `You just created an Ethereum account: ${addr}<br /><br />Please BACKUP the private key for this account: ${pk}`);
   ga('send', {
     hitType: 'event',
@@ -228,6 +225,17 @@ EtherDelta.prototype.createAccount = function createAccount() {
   });
 };
 EtherDelta.prototype.deleteAccount = function deleteAccount() {
+  if (this.pks[this.selectedAccount]) {
+    const addr = this.addrs[this.selectedAccount];
+    const pk = this.pks[this.selectedAccount];
+    this.dialogInfo(
+      `You are about to remove an Ethereum account: ${addr}<br /><br />If it has funds, please BACKUP the private key for this account: ${pk}`);
+    ga('send', {
+      hitType: 'event',
+      eventCategory: 'Action',
+      eventAction: 'Show private key and delete',
+    });
+  }
   this.addrs.splice(this.selectedAccount, 1);
   this.pks.splice(this.selectedAccount, 1);
   this.selectedAccount = 0;
@@ -250,7 +258,7 @@ EtherDelta.prototype.selectAccount = function selectAccount(i) {
   });
 };
 EtherDelta.prototype.addAccount = function addAccount(newAddr, newPk) {
-  let addr = newAddr;
+  let addr = newAddr.toLowerCase();
   let pk = newPk;
   if (addr.slice(0, 2) !== '0x') addr = `0x${addr}`;
   if (pk.slice(0, 2) === '0x') pk = pk.slice(2);
@@ -262,14 +270,14 @@ EtherDelta.prototype.addAccount = function addAccount(newAddr, newPk) {
     verifyPrivateKey = false;
   }
   if (pk && !verifyPrivateKey) {
-    this.alertError(`For account ${addr}, the private key is invalid.`);
+    this.dialogError(`For account ${addr}, the private key is invalid.`);
     ga('send', {
       hitType: 'event',
       eventCategory: 'Error',
       eventAction: 'Add Account - invalid private key',
     });
   } else if (!this.web3.isAddress(addr)) {
-    this.alertError(`The specified address, ${addr}, is invalid.`);
+    this.dialogError(`The specified address, ${addr}, is invalid.`);
     ga('send', {
       hitType: 'event',
       eventCategory: 'Error',
@@ -292,7 +300,7 @@ EtherDelta.prototype.showPrivateKey = function showPrivateKey() {
   const addr = this.addrs[this.selectedAccount];
   const pk = this.pks[this.selectedAccount];
   if (!pk) {
-    this.alertError(
+    this.dialogError(
       `For account ${addr}, there is no private key available. You can still transact if you are connected to Ethereum and the account is unlocked.`);
     ga('send', {
       hitType: 'event',
@@ -300,7 +308,7 @@ EtherDelta.prototype.showPrivateKey = function showPrivateKey() {
       eventAction: 'Show private key - unavailable',
     });
   } else {
-    this.alertDialog(`For account ${addr}, the private key is ${pk}.`);
+    this.dialogInfo(`For account ${addr}, the private key is ${pk}.`);
     ga('send', {
       hitType: 'event',
       eventCategory: 'Action',
@@ -309,7 +317,7 @@ EtherDelta.prototype.showPrivateKey = function showPrivateKey() {
   }
 };
 EtherDelta.prototype.addressLink = function addressLink(address) {
-  return `http://${this.config.ethTestnet ? 'testnet.' : ''}etherscan.io/address/${address}`;
+  return `https://${this.config.ethTestnet ? `${this.config.ethTestnet}.` : ''}etherscan.io/address/${address}`;
 };
 EtherDelta.prototype.contractAddr = function contractAddr(addr) {
   this.config.contractEtherDeltaAddr = addr;
@@ -324,18 +332,22 @@ EtherDelta.prototype.displayAccounts = function displayAccounts(callback) {
     this.selectedAccount = 0;
   }
   async.map(
-    this.addrs,
-    (addr, callbackMap) => {
+    this.addrs.map((x, i) => i),
+    (i, callbackMap) => {
+      const addr = this.addrs[i];
+      const pk = this.pks[i] ? true : false; // eslint-disable-line no-unneeded-ternary
+      const kind = this.addrKinds[i];
       utility.getBalance(this.web3, addr, (err, balance) => {
-        callbackMap(null, { addr, balance });
+        callbackMap(null, { addr, balance, pk, kind });
       });
     },
     (err, addresses) => {
-      const addressLink = `http://${this.config.ethTestnet ? 'testnet.' : ''}etherscan.io/address/${this.addrs[this.selectedAccount]}`;
+      const addressLink = `https://${this.config.ethTestnet ? `${this.config.ethTestnet}.` : ''}etherscan.io/address/${this.addrs[this.selectedAccount]}`;
       this.ejs(`${this.config.homeURL}/templates/addresses.ejs`, 'addresses', {
         addresses,
         selectedAccount: this.selectedAccount,
         addressLink,
+        connection: this.connection.connection,
       });
       callback();
     });
@@ -362,65 +374,55 @@ EtherDelta.prototype.selectLanguage = function selectLanguage(newLanguage) {
   });
 };
 EtherDelta.prototype.loadEvents = function loadEvents(callback) {
-  utility.blockNumber(this.web3, (err, blockNumber) => {
-    this.blockTimeSnapshot = { blockNumber, date: new Date() };
-    const startBlock = blockNumber - ((86400 * 7) / this.secondsPerBlock); // Approximately 7 days
-    let lastBlock = 0;
-    Object.keys(this.eventsCache).forEach((id) => {
-      const event = this.eventsCache[id];
-      if (event.blockNumber > lastBlock && event.address === this.config.contractEtherDeltaAddr) {
-        lastBlock = event.blockNumber;
-      }
-      Object.keys(event.args).forEach((arg) => {
-        if (typeof event.args[arg] === 'string' && event.args[arg].slice(0, 2) !== '0x') {
-          event.args[arg] = new BigNumber(event.args[arg]);
-        }
-      });
-      if (event.blockNumber < startBlock) delete this.eventsCache[id]; // delete old events
-    });
-    const blockInterval = 12500;
-    const searches = [];
-    for (let b = blockNumber; b > lastBlock; b -= blockInterval) {
-      searches.push([Math.max(lastBlock, b - blockInterval), b]);
+  let lastBlock = 0;
+  Object.keys(this.eventsCache).forEach((id) => {
+    const event = this.eventsCache[id];
+    if (event.blockNumber > lastBlock && event.address === this.config.contractEtherDeltaAddr) {
+      lastBlock = event.blockNumber;
     }
-    async.map(
-      searches,
-      (searchRange, callbackMap) => {
-        utility.logsOnce(
-          this.web3,
-          this.contractEtherDelta,
-          this.config.contractEtherDeltaAddr,
-          searchRange[0],
-          searchRange[1],
-          (errEvents, events) => {
-            let newEvents = 0;
-            events.forEach((event) => {
-              if (!this.eventsCache[event.transactionHash + event.logIndex]) {
-                newEvents += 1;
-                Object.assign(event, { txLink: `http://${this.config.ethTestnet ? 'testnet.' : ''}etherscan.io/tx/${event.transactionHash}` });
-                this.eventsCache[event.transactionHash + event.logIndex] = event;
-                // users with orders to update
-                if (event.event === 'Trade') {
-                  this.usersWithOrdersToUpdate[event.args.give] = true;
-                  this.usersWithOrdersToUpdate[event.args.get] = true;
-                } else if (['Deposit', 'Withdraw', 'Cancel'].indexOf(event.event) >= 0) {
-                  this.usersWithOrdersToUpdate[event.args.user] = true;
-                }
+  });
+  console.log('lastBlock', lastBlock);
+  utility.getURL(`${this.config.apiServer}/events/${this.apiServerNonce}/${lastBlock}`, (err, result) => {
+    if (!err && result !== 'error') {
+      try {
+        const res = JSON.parse(result);
+        const blockNumber = res.blockNumber;
+        const events = res.events;
+        let newEvents = 0;
+        Object.values(events).forEach((event) => {
+          if (!this.eventsCache[event.transactionHash + event.logIndex]) {
+            Object.keys(event.args).forEach((arg) => {
+              if (typeof event.args[arg] === 'string' && event.args[arg].slice(0, 2) !== '0x') {
+                Object.assign(event.args, { [arg]: new BigNumber(event.args[arg]) });
               }
             });
-            if (newEvents) {
-              callbackMap(null, newEvents);
-            } else {
-              callbackMap(null, 0);
+            newEvents += 1;
+            this.eventsCache[event.transactionHash + event.logIndex] = event;
+            // users with orders to update
+            if (event.event === 'Trade') {
+              this.usersWithOrdersToUpdate[event.args.give] = true;
+              this.usersWithOrdersToUpdate[event.args.get] = true;
+            } else if (['Deposit', 'Withdraw', 'Cancel'].indexOf(event.event) >= 0) {
+              this.usersWithOrdersToUpdate[event.args.user] = true;
             }
-          });
-      },
-      (errNewEvents, newEventsArr) => {
-        const newEvents = newEventsArr.reduce((a, b) => a + b, 0);
-        // utility.createCookie(this.config.eventsCacheCookie, JSON.stringify(eventsCache), 999);
-        utility.createCookie(this.config.eventsCacheCookie, JSON.stringify({}), 999);
-        callback(newEvents);
-      });
+          }
+        });
+        Object.keys(this.eventsCache).forEach((key) => {
+          if (this.eventsCache[key].blockNumber <
+          blockNumber - ((86400 * this.daysOfData) / this.secondsPerBlock)) {
+            delete this.eventsCache[key];
+          }
+        });
+        callback(null, newEvents);
+      } catch (errGet) {
+        console.log('Events log has not changed since last refresh.');
+        callback(null, 0);
+      }
+    } else {
+      this.apiServerNonce = Math.random().toString().slice(2) +
+        Math.random().toString().slice(2);
+      callback(null, 0);
+    }
   });
 };
 EtherDelta.prototype.displayMyTransactions =
@@ -428,11 +430,11 @@ function displayMyTransactions(ordersIn, blockNumber, callback) {
   // only look at orders for the selected token and base
   let orders = ordersIn.filter(
     x =>
-      (x.order.tokenGet === this.selectedToken.addr &&
-        x.order.tokenGive === this.selectedBase.addr &&
+      (x.order.tokenGet.toLowerCase() === this.selectedToken.addr.toLowerCase() &&
+        x.order.tokenGive.toLowerCase() === this.selectedBase.addr.toLowerCase() &&
         x.amount > 0) ||
-      (x.order.tokenGive === this.selectedToken.addr &&
-        x.order.tokenGet === this.selectedBase.addr &&
+      (x.order.tokenGive.toLowerCase() === this.selectedToken.addr.toLowerCase() &&
+        x.order.tokenGet.toLowerCase() === this.selectedBase.addr.toLowerCase() &&
         x.amount < 0));
   // only include orders by the selected user
   orders = orders.filter(
@@ -459,8 +461,8 @@ function displayMyTransactions(ordersIn, blockNumber, callback) {
         if (event.args.amountGive.toNumber() > 0 && event.args.amountGet.toNumber() > 0) {
           // don't show trades involving 0 amounts
           if (
-            event.args.tokenGet === this.selectedToken.addr &&
-            event.args.tokenGive === this.selectedBase.addr
+            event.args.tokenGet.toLowerCase() === this.selectedToken.addr.toLowerCase() &&
+            event.args.tokenGive.toLowerCase() === this.selectedBase.addr.toLowerCase()
           ) {
             // sell
             trade = {
@@ -473,8 +475,8 @@ function displayMyTransactions(ordersIn, blockNumber, callback) {
               seller: event.args.give,
             };
           } else if (
-            event.args.tokenGet === this.selectedBase.addr &&
-            event.args.tokenGive === this.selectedToken.addr
+            event.args.tokenGet.toLowerCase() === this.selectedBase.addr.toLowerCase() &&
+            event.args.tokenGive.toLowerCase() === this.selectedToken.addr.toLowerCase()
           ) {
             // buy
             trade = {
@@ -489,7 +491,7 @@ function displayMyTransactions(ordersIn, blockNumber, callback) {
           }
         }
         if (trade) {
-          const txLink = `http://${this.config.ethTestnet ? 'testnet.' : ''}etherscan.io/tx/${event.transactionHash}`;
+          const txLink = `https://${this.config.ethTestnet ? `${this.config.ethTestnet}.` : ''}etherscan.io/tx/${event.transactionHash}`;
           myEvents.push({
             trade,
             id: (event.blockNumber * 1000) + event.transactionIndex,
@@ -506,7 +508,7 @@ function displayMyTransactions(ordersIn, blockNumber, callback) {
         ) &&
         event.args.user.toLowerCase() === this.addrs[this.selectedAccount].toLowerCase()
       ) {
-        const txLink = `http://${this.config.ethTestnet ? 'testnet.' : ''}etherscan.io/tx/${event.transactionHash}`;
+        const txLink = `https://${this.config.ethTestnet ? `${this.config.ethTestnet}.` : ''}etherscan.io/tx/${event.transactionHash}`;
         const deposit = {
           token: event.args.token === this.selectedToken.addr ?
             this.selectedToken : this.selectedBase,
@@ -528,7 +530,7 @@ function displayMyTransactions(ordersIn, blockNumber, callback) {
         ) &&
         event.args.user.toLowerCase() === this.addrs[this.selectedAccount].toLowerCase()
       ) {
-        const txLink = `http://${this.config.ethTestnet ? 'testnet.' : ''}etherscan.io/tx/${event.transactionHash}`;
+        const txLink = `https://${this.config.ethTestnet ? `${this.config.ethTestnet}.` : ''}etherscan.io/tx/${event.transactionHash}`;
         const withdraw = {
           token: event.args.token === this.selectedToken.addr ?
             this.selectedToken : this.selectedBase,
@@ -583,12 +585,10 @@ function displayMyTransactions(ordersIn, blockNumber, callback) {
       callback();
     });
 };
-EtherDelta.prototype.displayVolumes = function displayVolumes(orders, blockNumber, callback) {
+EtherDelta.prototype.displayVolumes = function displayVolumes(
+  orders, returnTicker, blockNumber, callback) {
   let tokenVolumes = {};
   let pairVolumes = {};
-  const timeFrames = [86400 * 1000 * 7, 86400 * 1000 * 1];
-  const mainBases = ['DUSD', 'ETH']; // in order of priority
-  const now = new Date();
   // the default pairs
   for (let i = 0; i < this.config.pairs.length; i += 1) {
     const token = this.getToken(this.config.pairs[i].token);
@@ -599,86 +599,49 @@ EtherDelta.prototype.displayVolumes = function displayVolumes(orders, blockNumbe
         pairVolumes[pair] = {
           token,
           base,
-          volumes: Array(timeFrames.length).fill(0),
-          ethVolumes: Array(timeFrames.length).fill(0),
+          volume: 0,
+          ethVolume: 0,
         };
       }
     }
   }
   // get trading volume
-  const events = Object.values(this.eventsCache);
-  events.forEach((event) => {
-    if (event.event === 'Trade' && event.address === this.config.contractEtherDeltaAddr) {
-      const tokenGet = this.getToken(event.args.tokenGet);
-      const tokenGive = this.getToken(event.args.tokenGive);
-      const amountGet = event.args.amountGet;
-      const amountGive = event.args.amountGive;
-      if (tokenGet && tokenGive) {
-        if (!tokenVolumes[tokenGet.name]) {
-          tokenVolumes[tokenGet.name] = {
-            token: tokenGet,
-            volumes: Array(timeFrames.length).fill(0),
-            ethVolumes: Array(timeFrames.length).fill(0),
-          };
-        }
-        if (!tokenVolumes[tokenGive.name]) {
-          tokenVolumes[tokenGive.name] = {
-            token: tokenGive,
-            volumes: Array(timeFrames.length).fill(0),
-            ethVolumes: Array(timeFrames.length).fill(0),
-          };
-        }
-        let token;
-        let base;
-        let volume = 0;
-        let ethVolume;
-        mainBases.some((mainBase) => {
-          if (tokenGive.name === mainBase) {
-            token = tokenGet;
-            base = tokenGive;
-            volume = amountGet;
-            return true;
-          } else if (tokenGet.name === mainBase) {
-            token = tokenGive;
-            base = tokenGet;
-            volume = amountGive;
-            return true;
-          }
-          return false;
-        });
-        if (!token && !base && tokenGive.name >= tokenGet.name) {
-          token = tokenGive;
-          base = tokenGet;
-          volume = amountGive;
-        } else if (!token && !base && tokenGive.name < tokenGet.name) {
-          token = tokenGet;
-          base = tokenGive;
-          volume = amountGet;
-        }
-        if (tokenGive.name === 'ETH') ethVolume = amountGive;
-        if (tokenGet.name === 'ETH') ethVolume = amountGet;
-        const pair = `${token.name}/${base.name}`;
-        if (!pairVolumes[pair]) {
-          pairVolumes[pair] = {
-            token,
-            base,
-            volumes: Array(timeFrames.length).fill(0),
-            ethVolumes: Array(timeFrames.length).fill(0),
-          };
-        }
-        for (let i = 0; i < timeFrames.length; i += 1) {
-          const timeFrame = timeFrames[i];
-          if (now - this.blockTime(event.blockNumber) < timeFrame) {
-            tokenVolumes[tokenGet.name].volumes[i] += Number(amountGet);
-            tokenVolumes[tokenGive.name].volumes[i] += Number(amountGive);
-            pairVolumes[pair].volumes[i] += Number(volume);
-            if (ethVolume) {
-              tokenVolumes[tokenGet.name].ethVolumes[i] += Number(ethVolume);
-              tokenVolumes[tokenGive.name].ethVolumes[i] += Number(ethVolume);
-              pairVolumes[pair].ethVolumes[i] += Number(ethVolume);
-            }
-          }
-        }
+  Object.keys(this.returnTicker).forEach((returnKey) => {
+    const ret = this.returnTicker[returnKey];
+    const spl = returnKey.split('_');
+    const A = spl[0];
+    const B = spl[1];
+    const pair = `${B}/${A}`;
+    // console.log(pair)
+    if (pairVolumes[pair]) {
+      // console.log(pair, ret)
+      pairVolumes[pair].volume = Number(ret.quoteVolume);
+      pairVolumes[pair].ethVolume = Number(ret.baseVolume);
+    }
+    const tokenA = this.getToken(A);
+    const tokenB = this.getToken(B);
+    if (tokenA) {
+      if (tokenVolumes[A]) {
+        tokenVolumes[A].volume += Number(ret.baseVolume);
+        tokenVolumes[A].ethVolume += Number(ret.baseVolume);
+      } else {
+        tokenVolumes[A] = {
+          token: tokenA,
+          volume: Number(ret.baseVolume),
+          ethVolume: Number(ret.baseVolume),
+        };
+      }
+    }
+    if (tokenB) {
+      if (tokenVolumes[B]) {
+        tokenVolumes[B].volume += Number(ret.quoteVolume);
+        tokenVolumes[B].ethVolume += Number(ret.baseVolume);
+      } else {
+        tokenVolumes[B] = {
+          token: tokenB,
+          volume: Number(ret.quoteVolume),
+          ethVolume: Number(ret.baseVolume),
+        };
       }
     }
   });
@@ -690,8 +653,10 @@ EtherDelta.prototype.displayVolumes = function displayVolumes(orders, blockNumbe
     // only look at orders for the selected token and base
     let ordersFiltered = orders.filter(
       x =>
-        (x.order.tokenGet === token.addr && x.order.tokenGive === base.addr && x.amount > 0) ||
-        (x.order.tokenGive === token.addr && x.order.tokenGet === base.addr && x.amount < 0));
+        (x.order.tokenGet.toLowerCase() === token.addr.toLowerCase() &&
+        x.order.tokenGive.toLowerCase() === base.addr.toLowerCase() && x.amount > 0) ||
+        (x.order.tokenGive.toLowerCase() === token.addr.toLowerCase() &&
+        x.order.tokenGet.toLowerCase() === base.addr.toLowerCase() && x.amount < 0));
     // remove orders below the min order limit
     ordersFiltered = ordersFiltered.filter(order =>
       Number(order.ethAvailableVolume).toFixed(3) >= this.minOrderSize &&
@@ -710,9 +675,9 @@ EtherDelta.prototype.displayVolumes = function displayVolumes(orders, blockNumbe
     pairVolume.ask = ask;
   });
   tokenVolumes = Object.values(tokenVolumes);
-  tokenVolumes.sort((a, b) => b.ethVolumes[0] - a.ethVolumes[0]);
+  tokenVolumes.sort((a, b) => b.ethVolume - a.ethVolume);
   pairVolumes = Object.values(pairVolumes);
-  pairVolumes.sort((a, b) => b.ethVolumes[0] - a.ethVolumes[0]);
+  pairVolumes.sort((a, b) => b.ethVolume - a.ethVolume);
   this.ejs(`${this.config.homeURL}/templates/volume.ejs`, 'volume', {
     tokenVolumes,
     pairVolumes,
@@ -729,8 +694,8 @@ EtherDelta.prototype.displayTradesAndChart = function displayTradesAndChart(call
         // don't show trades involving 0 amounts
         let trade;
         if (
-          event.args.tokenGet === this.selectedToken.addr &&
-          event.args.tokenGive === this.selectedBase.addr
+          event.args.tokenGet.toLowerCase() === this.selectedToken.addr.toLowerCase() &&
+          event.args.tokenGive.toLowerCase() === this.selectedBase.addr.toLowerCase()
         ) {
           // sell
           trade = {
@@ -741,12 +706,13 @@ EtherDelta.prototype.displayTradesAndChart = function displayTradesAndChart(call
               .div(this.getDivisor(event.args.tokenGive)),
             id: (event.blockNumber * 1000) + event.transactionIndex,
             blockNumber: event.blockNumber,
+            date: new Date(utility.hexToDec(event.timeStamp) * 1000),
             buyer: event.args.get,
             seller: event.args.give,
           };
         } else if (
-          event.args.tokenGet === this.selectedBase.addr &&
-          event.args.tokenGive === this.selectedToken.addr
+          event.args.tokenGet.toLowerCase() === this.selectedBase.addr.toLowerCase() &&
+          event.args.tokenGive.toLowerCase() === this.selectedToken.addr.toLowerCase()
         ) {
           // buy
           trade = {
@@ -757,12 +723,13 @@ EtherDelta.prototype.displayTradesAndChart = function displayTradesAndChart(call
               .div(this.getDivisor(event.args.tokenGet)),
             id: (event.blockNumber * 1000) + event.transactionIndex,
             blockNumber: event.blockNumber,
+            date: new Date(utility.hexToDec(event.timeStamp) * 1000),
             buyer: event.args.give,
             seller: event.args.get,
           };
         }
         if (trade) {
-          trade.txLink = `http://${this.config.ethTestnet ? 'testnet.' : ''}etherscan.io/tx/${event.transactionHash}`;
+          trade.txLink = `https://${this.config.ethTestnet ? `${this.config.ethTestnet}.` : ''}etherscan.io/tx/${event.transactionHash}`;
           trades.push(trade);
         }
       }
@@ -782,7 +749,7 @@ EtherDelta.prototype.displayTradesAndChart = function displayTradesAndChart(call
   }
   const now = new Date();
   const data = trades
-    .map(trade => [this.blockTime(trade.blockNumber), trade.price.toNumber()])
+    .map(trade => [trade.date, trade.price.toNumber()])
     .filter(x => now - x[0] < 86400 * 1000 * 7);
   const values = data.map(x => x[1]);
   values.sort();
@@ -956,9 +923,9 @@ function lineChart(elem, title, xtype, ytype, xtitle, ytitle, data) {
     }
   });
 };
-EtherDelta.prototype.getOrders = function getOrders(callback) {
-  utility.getURL(`${this.config.apiServer}/orders/${this.apiServerNonce}`, (err, result) => {
-    if (!err) {
+EtherDelta.prototype.getOrdersByPair = function getOrdersByPair(tokenA, tokenB, callback) {
+  utility.getURL(`${this.config.apiServer}/orders/${this.apiServerNonce}/${tokenA}/${tokenB}`, (err, result) => {
+    if (!err && result !== 'error') {
       try {
         const res = JSON.parse(result);
         const blockNumber = res.blockNumber;
@@ -990,51 +957,26 @@ EtherDelta.prototype.getOrders = function getOrders(callback) {
         });
         callback(null, { orders, blockNumber });
       } catch (errCatch) {
-        callback(err, undefined);
+        callback(err, this.ordersResultByPair);
       }
     } else {
-      callback(err, undefined);
+      this.apiServerNonce = Math.random().toString().slice(2) +
+        Math.random().toString().slice(2);
+      callback(err, this.ordersResultByPair);
     }
   });
 };
-EtherDelta.prototype.getOrdersByPair = function getOrdersByPair(tokenA, tokenB, callback) {
-  utility.getURL(`${this.config.apiServer}/orders/${this.apiServerNonce}/${tokenA}/${tokenB}`, (err, result) => {
-    if (!err) {
+EtherDelta.prototype.getReturnTicker = function getTopOrders(callback) {
+  utility.getURL(`${this.config.apiServer}/returnTicker`, (err, result) => {
+    if (!err && result !== 'error') {
       try {
         const res = JSON.parse(result);
-        const blockNumber = res.blockNumber;
-        let orders;
-        if (Array.isArray(res.orders)) {
-          orders = res.orders;
-        } else {
-          orders = Object.values(res.orders);
-        }
-        orders.forEach((x) => {
-          Object.assign(x, {
-            price: new BigNumber(x.price),
-            // amount: new BigNumber(x.amount),
-            // availableVolume: new BigNumber(x.availableVolume),
-            // ethAvailableVolume: x.ethAvailableVolume,
-            order: Object.assign(x.order, {
-              amountGet: new BigNumber(x.order.amountGet),
-              amountGive: new BigNumber(x.order.amountGive),
-              expires: Number(x.order.expires),
-              nonce: Number(x.order.nonce),
-              tokenGet: x.order.tokenGet,
-              tokenGive: x.order.tokenGive,
-              user: x.order.user,
-              r: x.order.r,
-              s: x.order.s,
-              v: x.order.v ? Number(x.order.v) : undefined,
-            }),
-          });
-        });
-        callback(null, { orders, blockNumber });
+        callback(null, res);
       } catch (errCatch) {
-        callback(err, undefined);
+        callback(err, this.returnTicker);
       }
     } else {
-      callback(err, undefined);
+      callback(err, this.returnTicker);
     }
   });
 };
@@ -1072,10 +1014,10 @@ EtherDelta.prototype.getTopOrders = function getTopOrders(callback) {
         });
         callback(null, { orders, blockNumber });
       } catch (errCatch) {
-        callback(err, undefined);
+        callback(err, this.topOrdersResult);
       }
     } else {
-      callback(err, undefined);
+      callback(err, this.topOrdersResult);
     }
   });
 };
@@ -1083,11 +1025,11 @@ EtherDelta.prototype.displayOrderbook = function displayOrderbook(ordersIn, bloc
   // only look at orders for the selected token and base
   let orders = ordersIn.filter(
     x =>
-      (x.order.tokenGet === this.selectedToken.addr &&
-        x.order.tokenGive === this.selectedBase.addr &&
+      (x.order.tokenGet.toLowerCase() === this.selectedToken.addr.toLowerCase() &&
+        x.order.tokenGive.toLowerCase() === this.selectedBase.addr.toLowerCase() &&
         x.amount > 0) ||
-      (x.order.tokenGive === this.selectedToken.addr &&
-        x.order.tokenGet === this.selectedBase.addr &&
+      (x.order.tokenGive.toLowerCase() === this.selectedToken.addr.toLowerCase() &&
+        x.order.tokenGet.toLowerCase() === this.selectedBase.addr.toLowerCase() &&
         x.amount < 0));
   // remove orders below the min order limit
   orders = orders.filter(order =>
@@ -1148,7 +1090,10 @@ EtherDelta.prototype.displayOrderbook = function displayOrderbook(ordersIn, bloc
     $('#orderBookMid').position().top -
     ($('#orderBookScroll')[0].clientHeight / 2) -
     $('#orderBookMid')[0].clientHeight;
-  this.depthChart('chartDepth', '', '', '', depthData, median * 0.25, median * 1.75);
+  const depthDataFiltered = depthData.slice(0, 1).concat(depthData.slice(1)
+    .map(x => [x[0], Number(x[1]), x[2]])
+    .filter(x => x[0] > median * 0.025 && x[0] < median * 1.75));
+  this.depthChart('chartDepth', '', '', '', depthDataFiltered, median * 0.25, median * 1.75);
   callback();
 };
 EtherDelta.prototype.displayTokensAndBases = function displayTokensAndBases(callback) {
@@ -1186,7 +1131,7 @@ EtherDelta.prototype.displayAllBalances = function displayAllBalances(callback) 
                   token,
                   balance,
                   balanceOutside,
-                  tokenLink: `http://${this.config.ethTestnet ? 'testnet.' : ''}etherscan.io/address/${this.addrs[this.selectedAccount]}`,
+                  tokenLink: `https://${this.config.ethTestnet ? `${this.config.ethTestnet}.` : ''}etherscan.io/address/${this.addrs[this.selectedAccount]}`,
                 };
                 callbackMap(null, balanceObj);
               });
@@ -1211,7 +1156,7 @@ EtherDelta.prototype.displayAllBalances = function displayAllBalances(callback) 
                   token,
                   balance,
                   balanceOutside,
-                  tokenLink: `http://${this.config.ethTestnet ? 'testnet.' : ''}etherscan.io/token/${token.addr}`,
+                  tokenLink: `https://${this.config.ethTestnet ? `${this.config.ethTestnet}.` : ''}etherscan.io/token/${token.addr}`,
                 };
                 callbackMap(null, balanceObj);
               });
@@ -1241,10 +1186,10 @@ EtherDelta.prototype.displayAllBalances = function displayAllBalances(callback) 
     });
 };
 EtherDelta.prototype.transfer = function transfer(addr, inputAmount, toAddr) {
-  let amount = utility.ethToWei(inputAmount, this.getDivisor(addr));
+  let amount = new BigNumber(Number(utility.ethToWei(inputAmount, this.getDivisor(addr))));
   const token = this.getToken(addr);
-  if (amount <= 0) {
-    this.alertError('You must specify a valid amount to transfer.');
+  if (amount.lte(0)) {
+    this.dialogError('You must specify a valid amount to transfer.');
     ga('send', {
       hitType: 'event',
       eventCategory: 'Error',
@@ -1255,7 +1200,16 @@ EtherDelta.prototype.transfer = function transfer(addr, inputAmount, toAddr) {
     return;
   }
   if (!this.web3.isAddress(toAddr) || toAddr.slice(0, 39) === '0x0000000000000000000000000000000000000' || toAddr.toLowerCase() === this.addrs[this.selectedAccount].toLowerCase()) {
-    this.alertError('Please specify a valid address.');
+    this.dialogError('Please specify a valid address.');
+    ga('send', {
+      hitType: 'event',
+      eventCategory: 'Error',
+      eventAction: 'Transfer - invalid address',
+      eventLabel: token.name,
+      eventValue: inputAmount,
+    });
+  } else if (toAddr.toLowerCase() === this.config.contractEtherDeltaAddr.toLowerCase()) {
+    this.dialogError('If you send funds directly to the EtherDelta smart contract, they will be lost. You need to use the Deposit tab to deposit.');
     ga('send', {
       hitType: 'event',
       eventCategory: 'Error',
@@ -1266,9 +1220,9 @@ EtherDelta.prototype.transfer = function transfer(addr, inputAmount, toAddr) {
   } else if (addr.slice(0, 39) === '0x0000000000000000000000000000000000000') {
     // plain Ether transfer
     utility.getBalance(this.web3, this.addrs[this.selectedAccount], (err, balance) => {
-      if (amount > balance) amount = balance;
-      if (amount <= 0) {
-        this.alertError('You do not have anything to transfer. Note: you can only transfer from your "Wallet." If you have Ether on deposit, please withdraw first, then transfer.');
+      if (amount.gt(balance)) amount = balance;
+      if (amount.lte(0)) {
+        this.dialogError('You do not have anything to transfer. Note: you can only transfer from your "Wallet." If you have Ether on deposit, please withdraw first, then transfer.');
         ga('send', {
           hitType: 'event',
           eventCategory: 'Error',
@@ -1282,7 +1236,7 @@ EtherDelta.prototype.transfer = function transfer(addr, inputAmount, toAddr) {
           undefined,
           toAddr,
           undefined,
-          [{ gas: this.config.gasDeposit, value: amount }],
+          [{ gas: this.config.gasDeposit, value: amount.toNumber() }],
           this.addrs[this.selectedAccount],
           this.pks[this.selectedAccount],
           this.nonce,
@@ -1309,9 +1263,9 @@ EtherDelta.prototype.transfer = function transfer(addr, inputAmount, toAddr) {
       'balanceOf',
       [this.addrs[this.selectedAccount]],
       (err, result) => {
-        if (amount > result) amount = result;
-        if (amount <= 0) {
-          this.alertError('You do not have anything to transfer. Note: you can only transfer from your "Wallet." If you have tokens on deposit, please withdraw first, then transfer.');
+        if (amount.gt(result)) amount = result;
+        if (amount.lte(0)) {
+          this.dialogError('You do not have anything to transfer. Note: you can only transfer from your "Wallet." If you have tokens on deposit, please withdraw first, then transfer.');
           ga('send', {
             hitType: 'event',
             eventCategory: 'Error',
@@ -1346,10 +1300,10 @@ EtherDelta.prototype.transfer = function transfer(addr, inputAmount, toAddr) {
   }
 };
 EtherDelta.prototype.deposit = function deposit(addr, inputAmount) {
-  let amount = utility.ethToWei(inputAmount, this.getDivisor(addr));
+  let amount = new BigNumber(Number(utility.ethToWei(inputAmount, this.getDivisor(addr))));
   const token = this.getToken(addr);
-  if (amount <= 0) {
-    this.alertError('You must specify a valid amount to deposit.');
+  if (amount.lte(0)) {
+    this.dialogError('You must specify a valid amount to deposit.');
     ga('send', {
       hitType: 'event',
       eventCategory: 'Error',
@@ -1361,14 +1315,14 @@ EtherDelta.prototype.deposit = function deposit(addr, inputAmount) {
   }
   if (addr.slice(0, 39) === '0x0000000000000000000000000000000000000') {
     utility.getBalance(this.web3, this.addrs[this.selectedAccount], (err, result) => {
-      if (amount > result && amount < result * 1.1) amount = result;
-      if (amount <= result) {
+      if (amount.gt(result) && amount.lt(result.times(new BigNumber(1.1)))) amount = result;
+      if (amount.lte(result)) {
         utility.send(
           this.web3,
           this.contractEtherDelta,
           this.config.contractEtherDeltaAddr,
           'deposit',
-          [{ gas: this.config.gasDeposit, value: amount }],
+          [{ gas: this.config.gasDeposit, value: amount.toNumber() }],
           this.addrs[this.selectedAccount],
           this.pks[this.selectedAccount],
           this.nonce,
@@ -1385,7 +1339,7 @@ EtherDelta.prototype.deposit = function deposit(addr, inputAmount) {
             });
           });
       } else {
-        this.alertError("You can't deposit more Ether than you have.");
+        this.dialogError("You can't deposit more Ether than you have.");
         ga('send', {
           hitType: 'event',
           eventCategory: 'Error',
@@ -1400,38 +1354,67 @@ EtherDelta.prototype.deposit = function deposit(addr, inputAmount) {
       this.web3,
       this.contractToken,
       token.addr,
-      'balanceOf',
-      [this.addrs[this.selectedAccount]],
-      (err, result) => {
-        if (amount > result && amount < result * 1.1) amount = result;
-        if (amount <= result) {
-          utility.send(
-            this.web3,
-            this.contractToken,
-            addr,
-            'approve',
-            [this.config.contractEtherDeltaAddr, amount, { gas: this.config.gasApprove, value: 0 }],
-            this.addrs[this.selectedAccount],
-            this.pks[this.selectedAccount],
-            this.nonce,
-            (errSend, resultSend) => {
-              this.nonce = resultSend.nonce;
+      'allowance',
+      [this.addrs[this.selectedAccount], this.config.contractEtherDeltaAddr],
+      (errAllowance, resultAllowance) => {
+        if (resultAllowance.gt(0) && amount.gt(resultAllowance)) amount = resultAllowance;
+        utility.call(
+          this.web3,
+          this.contractToken,
+          token.addr,
+          'balanceOf',
+          [this.addrs[this.selectedAccount]],
+          (errBalanceOf, resultBalanceOf) => {
+            if (amount.gt(resultBalanceOf) &&
+              amount.lt(resultBalanceOf.times(new BigNumber(1.1)))) amount = resultBalanceOf;
+            if (amount.lte(resultBalanceOf)) {
               const txs = [];
-              txs.push(resultSend);
-              utility.send(
-                this.web3,
-                this.contractEtherDelta,
-                this.config.contractEtherDeltaAddr,
-                'depositToken',
-                [addr, amount, { gas: this.config.gasDeposit, value: 0 }],
-                this.addrs[this.selectedAccount],
-                this.pks[this.selectedAccount],
-                this.nonce,
-                (errSend2, resultSend2) => {
-                  this.nonce = resultSend2.nonce;
-                  txs.push(resultSend2);
-                  this.addPending(errSend || errSend2, txs);
-                  this.alertTxResult(errSend || errSend2, txs);
+              async.series(
+                [
+                  (callbackSeries) => {
+                    if (resultAllowance.eq(0)) {
+                      utility.send(
+                        this.web3,
+                        this.contractToken,
+                        addr,
+                        'approve',
+                        [this.config.contractEtherDeltaAddr, amount,
+                          { gas: this.config.gasApprove, value: 0 }],
+                        this.addrs[this.selectedAccount],
+                        this.pks[this.selectedAccount],
+                        this.nonce,
+                        (errSend, resultSend) => {
+                          this.nonce = resultSend.nonce;
+                          txs.push(resultSend);
+                          callbackSeries(null, { errSend, resultSend });
+                        });
+                    } else {
+                      callbackSeries(null, undefined);
+                    }
+                  },
+                  (callbackSeries) => {
+                    utility.send(
+                      this.web3,
+                      this.contractEtherDelta,
+                      this.config.contractEtherDeltaAddr,
+                      'depositToken',
+                      [addr, amount, { gas: this.config.gasDeposit, value: 0 }],
+                      this.addrs[this.selectedAccount],
+                      this.pks[this.selectedAccount],
+                      this.nonce,
+                      (errSend, resultSend) => {
+                        this.nonce = resultSend.nonce;
+                        txs.push(resultSend);
+                        callbackSeries(null, { errSend, resultSend });
+                      });
+                  },
+                ],
+                (err, results) => {
+                  const [tx1, tx2] = results;
+                  const errSend1 = tx1 ? tx1.errSend1 : undefined;
+                  const errSend2 = tx2 ? tx2.errSend1 : undefined;
+                  this.addPending(errSend1 || errSend2, txs);
+                  this.alertTxResult(errSend1 || errSend2, txs);
                   ga('send', {
                     hitType: 'event',
                     eventCategory: 'Action',
@@ -1440,25 +1423,25 @@ EtherDelta.prototype.deposit = function deposit(addr, inputAmount) {
                     eventValue: inputAmount,
                   });
                 });
-            });
-        } else {
-          this.alertError("You can't deposit more tokens than you have.");
-          ga('send', {
-            hitType: 'event',
-            eventCategory: 'Error',
-            eventAction: 'Deposit - not enough balance',
-            eventLabel: token.name,
-            eventValue: inputAmount,
+            } else {
+              this.dialogError("You can't deposit more tokens than you have.");
+              ga('send', {
+                hitType: 'event',
+                eventCategory: 'Error',
+                eventAction: 'Deposit - not enough balance',
+                eventLabel: token.name,
+                eventValue: inputAmount,
+              });
+            }
           });
-        }
       });
   }
 };
 EtherDelta.prototype.withdraw = function withdraw(addr, amountIn) {
-  let amount = utility.ethToWei(amountIn, this.getDivisor(addr));
+  let amount = new BigNumber(Number(utility.ethToWei(amountIn, this.getDivisor(addr))));
   const token = this.getToken(addr);
-  if (amount <= 0) {
-    this.alertError('You must specify a valid amount to withdraw.');
+  if (amount.lte(0)) {
+    this.dialogError('You must specify a valid amount to withdraw.');
     ga('send', {
       hitType: 'event',
       eventCategory: 'Error',
@@ -1481,8 +1464,8 @@ EtherDelta.prototype.withdraw = function withdraw(addr, amountIn) {
       if (amount > balance) {
         amount = balance;
       }
-      if (amount <= 0) {
-        this.alertError("You don't have anything to withdraw.");
+      if (amount.lte(0)) {
+        this.dialogError("You don't have anything to withdraw.");
         ga('send', {
           hitType: 'event',
           eventCategory: 'Error',
@@ -1573,7 +1556,7 @@ EtherDelta.prototype.publishOrder = function publishOrder(
   let amountGet;
   let amountGive;
   if (this.addrs[this.selectedAccount].slice(0, 39) === '0x0000000000000000000000000000000000000') {
-    this.alertError(
+    this.dialogError(
       "You haven't selected an account. Make sure you have an account selected from the Accounts dropdown in the upper right.");
     ga('send', {
       hitType: 'event',
@@ -1583,7 +1566,7 @@ EtherDelta.prototype.publishOrder = function publishOrder(
     });
     return;
   } else if (amount < this.minOrderSize || amount * price < this.minOrderSize) {
-    this.alertError(`The minimum order size (for both tokens in your order) is ${this.minOrderSize}.`);
+    this.dialogError(`The minimum order size (for both tokens in your order) is ${this.minOrderSize}.`);
     ga('send', {
       hitType: 'event',
       eventCategory: 'Error',
@@ -1616,7 +1599,7 @@ EtherDelta.prototype.publishOrder = function publishOrder(
     (err, result) => {
       const balance = result;
       if (balance.lt(new BigNumber(amountGive))) {
-        this.alertError(
+        this.dialogError(
           "You do not have enough funds to send this order. Please DEPOSIT first using the Deposit form in the upper left. Enter the amount you want to deposit and press the 'Deposit' button.");
         ga('send', {
           hitType: 'event',
@@ -1642,7 +1625,7 @@ EtherDelta.prototype.publishOrder = function publishOrder(
         hash, this.pks[this.selectedAccount], (errSign, sig) => {
           if (errSign) {
             console.log(errSign);
-            this.alertError(
+            this.dialogError(
               'Order signing failed. Make sure you have an account selected from the Accounts dropdown in the upper right.');
             ga('send', {
               hitType: 'event',
@@ -1681,8 +1664,8 @@ EtherDelta.prototype.publishOrder = function publishOrder(
                     eventLabel: `${this.selectedToken.name}/${this.selectedBase.name}`,
                   });
                 } else {
-                  this.alertError(
-                    `You tried sending an order to the order book but there was an error: ${err}`);
+                  this.dialogError(
+                    'You tried sending an order to the order book but there was an error...');
                   ga('send', {
                     hitType: 'event',
                     eventCategory: 'Error',
@@ -1765,7 +1748,7 @@ EtherDelta.prototype.cancelOrder = function cancelOrder(orderIn) {
 };
 EtherDelta.prototype.trade = function trade(kind, order, inputAmount) {
   if (this.addrs[this.selectedAccount].slice(0, 39) === '0x0000000000000000000000000000000000000') {
-    this.alertError(
+    this.dialogError(
       "You haven't selected an account. Make sure you have an account selected from the Accounts dropdown in the upper right.");
     ga('send', {
       hitType: 'event',
@@ -1778,13 +1761,13 @@ EtherDelta.prototype.trade = function trade(kind, order, inputAmount) {
   let amount;
   if (kind === 'sell') {
     // if I'm selling a bid, the buyer is getting the token
-    amount = utility.ethToWei(inputAmount, this.getDivisor(order.tokenGet));
+    amount = new BigNumber(utility.ethToWei(inputAmount, this.getDivisor(order.tokenGet)));
   } else if (kind === 'buy') {
     // if I'm buying an offer, the seller is getting
     // the base and giving the token, so must convert to get terms
-    amount = utility.ethToWei(
+    amount = new BigNumber(utility.ethToWei(
       inputAmount * (Number(order.amountGet) / Number(order.amountGive)),
-      this.getDivisor(order.tokenGive));
+      this.getDivisor(order.tokenGive)));
   } else {
     return;
   }
@@ -1795,7 +1778,7 @@ EtherDelta.prototype.trade = function trade(kind, order, inputAmount) {
     'balanceOf',
     [order.tokenGet, this.addrs[this.selectedAccount]],
     (err, result) => {
-      const availableBalance = result.toNumber();
+      const availableBalance = result;
       utility.call(
         this.web3,
         this.contractEtherDelta,
@@ -1814,12 +1797,12 @@ EtherDelta.prototype.trade = function trade(kind, order, inputAmount) {
           order.s,
         ],
         (errAvailableVolume, resultAvailableVolume) => {
-          const availableVolume = resultAvailableVolume.toNumber();
-          if (amount > availableBalance / 1.0031) {
+          const availableVolume = resultAvailableVolume;
+          if (amount.gt(availableBalance.divToInt(1.0031))) {
             // balance adjusted for fees (0.0001 to avoid rounding error)
-            amount = availableBalance / 1.0031;
+            amount = availableBalance.divToInt(1.0031);
           }
-          if (amount > availableVolume) amount = availableVolume;
+          if (amount.gt(availableVolume)) amount = availableVolume;
           let v = Number(order.v);
           let r = order.r;
           let s = order.s;
@@ -1883,9 +1866,20 @@ EtherDelta.prototype.trade = function trade(kind, order, inputAmount) {
                       eventValue: inputAmount,
                     });
                   });
+              } else if (utility.weiToEth(availableVolume,
+              this.getDivisor(this.selectedToken)) < this.minOrderSize) {
+                this.dialogError(
+                  "You cannot trade this order because it already traded. Someone else already traded this order and the order book hasn't updated yet.");
+                ga('send', {
+                  hitType: 'event',
+                  eventCategory: 'Error',
+                  eventAction: 'Trade - failed',
+                  eventLabel: `${this.selectedToken.name}/${this.selectedBase.name}`,
+                  eventValue: inputAmount,
+                });
               } else {
-                this.alertError(
-                  "You cannot trade this order. Either this order already traded, or you don't have enough funds. Please DEPOSIT first using the Deposit form in the upper left. Enter the amount you want to deposit and press the 'Deposit' button.");
+                this.dialogError(
+                  "You cannot trade this order because you don't have enough funds. Please DEPOSIT first using the Deposit form in the upper left. Enter the amount you want to deposit and press the 'Deposit' button.");
                 ga('send', {
                   hitType: 'event',
                   eventCategory: 'Error',
@@ -1898,16 +1892,11 @@ EtherDelta.prototype.trade = function trade(kind, order, inputAmount) {
         });
     });
 };
-EtherDelta.prototype.blockTime = function blockTime(block) {
-  return new Date(
-    this.blockTimeSnapshot.date.getTime() +
-      ((block - this.blockTimeSnapshot.blockNumber) * 1000 * this.secondsPerBlock));
-};
 EtherDelta.prototype.addPending = function addPending(err, txsIn) {
   const txs = Array.isArray(txsIn) ? txsIn : [txsIn];
   txs.forEach((tx) => {
     if (!err && tx.txHash && tx.txHash !== '0x0000000000000000000000000000000000000000000000000000000000000000') {
-      Object.assign(tx, { txLink: `https://${this.config.ethTestnet ? 'testnet.' : ''}etherscan.io/tx/${tx.txHash}` });
+      Object.assign(tx, { txLink: `https://${this.config.ethTestnet ? `${this.config.ethTestnet}.` : ''}etherscan.io/tx/${tx.txHash}` });
       this.pendingTransactions.push(tx);
     }
   });
@@ -1934,7 +1923,9 @@ EtherDelta.prototype.getDivisor = function getDivisor(tokenOrAddress) {
 };
 EtherDelta.prototype.getToken = function getToken(addrOrToken, name, decimals) {
   let result;
-  const matchingTokens = this.config.tokens.filter(x => x.addr === addrOrToken ||
+  const lowerAddrOrToken = typeof addrOrToken === 'string' ? addrOrToken.toLowerCase() : addrOrToken;
+  const matchingTokens = this.config.tokens.filter(
+    x => x.addr.toLowerCase() === lowerAddrOrToken ||
     x.name === addrOrToken);
   const expectedKeys = JSON.stringify([
     'addr',
@@ -1943,15 +1934,16 @@ EtherDelta.prototype.getToken = function getToken(addrOrToken, name, decimals) {
   ]);
   if (matchingTokens.length > 0) {
     result = matchingTokens[0];
-  } else if (this.selectedToken.addr === addrOrToken) {
+  } else if (this.selectedToken.addr.toLowerCase() === lowerAddrOrToken) {
     result = this.selectedToken;
-  } else if (this.selectedBase.addr === addrOrToken) {
+  } else if (this.selectedBase.addr.toLowerCase() === lowerAddrOrToken) {
     result = this.selectedBase;
-  } else if (addrOrToken.addr && JSON.stringify(Object.keys(addrOrToken).sort()) === expectedKeys) {
+  } else if (addrOrToken && addrOrToken.addr &&
+  JSON.stringify(Object.keys(addrOrToken).sort()) === expectedKeys) {
     result = addrOrToken;
-  } else if (addrOrToken.slice(0, 2) === '0x' && name && decimals >= 0) {
+  } else if (typeof addrOrToken === 'string' && addrOrToken.slice(0, 2) === '0x' && name && decimals >= 0) {
     result = JSON.parse(JSON.stringify(this.config.tokens[0]));
-    result.addr = addrOrToken;
+    result.addr = lowerAddrOrToken;
     result.name = name;
     result.decimals = decimals;
   }
@@ -1964,7 +1956,7 @@ EtherDelta.prototype.loadToken = function loadToken(addr, callback) {
   } else {
     token = JSON.parse(JSON.stringify(this.config.tokens[0]));
     if (addr.slice(0, 2) === '0x') {
-      token.addr = addr;
+      token.addr = addr.toLowerCase();
       utility.call(this.web3, this.contractToken, token.addr, 'decimals', [], (err, result) => {
         if (!err && result >= 0) token.decimals = result.toNumber();
         utility.call(this.web3, this.contractToken, token.addr, 'name', [], (errName, resultName) => {
@@ -1984,10 +1976,8 @@ EtherDelta.prototype.loadToken = function loadToken(addr, callback) {
 EtherDelta.prototype.selectToken = function selectToken(addrOrToken, name, decimals) {
   const token = this.getToken(addrOrToken, name, decimals);
   if (token) {
-    this.selectedToken = token;
-    this.ordersResultByPair = { orders: [], blockNumber: 0 };
     this.loading(() => {});
-    this.refresh(() => {}, true, true, this.selectedToken, this.selectedBase);
+    this.refresh(() => {}, true, true, token, this.selectedBase);
     ga('send', {
       hitType: 'event',
       eventCategory: 'Token',
@@ -1999,10 +1989,8 @@ EtherDelta.prototype.selectToken = function selectToken(addrOrToken, name, decim
 EtherDelta.prototype.selectBase = function selectBase(addrOrToken, name, decimals) {
   const base = this.getToken(addrOrToken, name, decimals);
   if (base) {
-    this.selectedBase = base;
-    this.ordersResultByPair = { orders: [], blockNumber: 0 };
     this.loading(() => {});
-    this.refresh(() => {}, true, true, this.selectedToken, this.selectedBase);
+    this.refresh(() => {}, true, true, this.selectedToken, base);
     ga('send', {
       hitType: 'event',
       eventCategory: 'Token',
@@ -2015,17 +2003,20 @@ EtherDelta.prototype.selectTokenAndBase = function selectTokenAndBase(tokenAddr,
   const token = this.getToken(tokenAddr);
   const base = this.getToken(baseAddr);
   if (token && base) {
-    this.selectedToken = token;
-    this.selectedBase = base;
-    this.ordersResultByPair = { orders: [], blockNumber: 0 };
     this.loading(() => {});
-    this.refresh(() => {}, true, true, this.selectedToken, this.selectedBase);
+    this.refresh(() => {}, true, true, token, base);
     ga('send', {
       hitType: 'event',
       eventCategory: 'Token',
       eventAction: 'Select Pair',
       eventLabel: `${this.selectedToken.name}/${this.selectedBase.name}`,
     });
+  }
+};
+EtherDelta.prototype.setGasPrice = function setGasPrice(gasPrice) {
+  if (gasPrice) {
+    this.config.ethGasPrice = Number(gasPrice) * 1000000000;
+    this.minGas = (this.config.ethGasPrice * this.config.gasDeposit) / (10 ** 18);
   }
 };
 EtherDelta.prototype.displayBuySell = function displayBuySell(callback) {
@@ -2077,7 +2068,7 @@ EtherDelta.prototype.displayConnectionDescription = function displayConnectionDe
     connection: this.connection,
     contracts: this.config.contractEtherDeltaAddrs,
     contractAddr: this.config.contractEtherDeltaAddr,
-    contractLink: `http://${this.config.ethTestnet ? 'testnet.' : ''}etherscan.io/address/${this.config.contractEtherDeltaAddr}`,
+    contractLink: `https://${this.config.ethTestnet ? `${this.config.ethTestnet}.` : ''}etherscan.io/address/${this.config.contractEtherDeltaAddr}`,
   });
 };
 EtherDelta.prototype.displayTokenGuide = function displayTokenGuide(name) {
@@ -2086,7 +2077,7 @@ EtherDelta.prototype.displayTokenGuide = function displayTokenGuide(name) {
     const token = matchingTokens[0];
     $('#tokenGuideTitle').html(name);
     $('#tokenGuideBody').html('');
-    const tokenLink = `http://${this.config.ethTestnet ? 'testnet.' : ''}etherscan.io/token/${token.addr}`;
+    const tokenLink = `https://${this.config.ethTestnet ? `${this.config.ethTestnet}.` : ''}etherscan.io/token/${token.addr}`;
     this.ejs(`${this.config.homeURL}/tokenGuides/details.ejs`, 'tokenGuideDetails', {
       token,
       tokenLink,
@@ -2114,7 +2105,7 @@ EtherDelta.prototype.checkContractUpgrade = function checkContractUpgrade() {
     (this.addrs.length > 1 ||
       (this.addrs.length === 1 && this.addrs[0].slice(0, 39) !== '0x0000000000000000000000000000000000000'))
   ) {
-    this.alertDialog(
+    this.dialogInfo(
       '<p>EtherDelta has a new smart contract. It is now selected.</p><p>Please use the "Smart Contract" menu to select the old one and withdraw from it.</p><p><a href="javascript:;" class="btn btn-default" onclick="alertify.closeAll(); bundle.EtherDelta.displayHelp(\'smartContract\')">Smart contract changelog</a></p>');
   }
 };
@@ -2146,9 +2137,17 @@ EtherDelta.prototype.loading = function loading(callback) {
   callback();
 };
 EtherDelta.prototype.refresh = function refresh(callback, forceEventRead, initMarket, token, base) {
-  if (token) this.selectedToken = token;
-  if (base) this.selectedBase = base;
   this.q.push((done) => {
+    if (token && base) {
+      this.selectedToken = token;
+      this.selectedBase = base;
+      this.ordersResultByPair = { orders: [], blockNumber: 0 };
+    }
+    if (this.selectedToken.name === 'ETH' && ['USD.DC', 'BTC.DC'].indexOf(this.selectedBase.name) < 0) {
+      const temp = this.selectedBase;
+      this.selectedBase = this.selectedToken;
+      this.selectedToken = temp;
+    }
     console.log('Beginning refresh', new Date(), `${this.selectedToken.name}/${this.selectedBase.name}`);
     this.selectedContract = this.config.contractEtherDeltaAddr;
     utility.createCookie(
@@ -2192,13 +2191,18 @@ EtherDelta.prototype.refresh = function refresh(callback, forceEventRead, initMa
           async.parallel(
             [
               (callbackParallel) => {
-                this.loadEvents((newEvents) => {
+                console.log('Displaying my account balances', new Date());
+                this.displayAccounts(() => {});
+                this.displayAllBalances(() => {
+                  console.log('Done displaying my account balances', new Date());
+                });
+                callbackParallel();
+              },
+              (callbackParallel) => {
+                console.log('Loading events', new Date());
+                this.loadEvents((err, newEvents) => {
+                  console.log('Done loading events', newEvents, new Date());
                   callbackParallel(null, undefined);
-                  if (newEvents > 0 || forceEventRead) {
-                    this.displayAccounts(() => {});
-                    this.displayAllBalances(() => {});
-                    this.displayTradesAndChart(() => {});
-                  }
                 });
               },
               (callbackParallel) => {
@@ -2210,6 +2214,16 @@ EtherDelta.prototype.refresh = function refresh(callback, forceEventRead, initMa
                           this.topOrdersResult = result;
                         } else {
                           console.log('Top levels have not changed since last refresh.');
+                        }
+                        callbackParallel2(null, undefined);
+                      });
+                    },
+                    (callbackParallel2) => {
+                      this.getReturnTicker((err, result) => {
+                        if (!err && result) {
+                          this.returnTicker = result;
+                        } else {
+                          console.log('Return ticker has not changed since last refresh.');
                         }
                         callbackParallel2(null, undefined);
                       });
@@ -2229,39 +2243,50 @@ EtherDelta.prototype.refresh = function refresh(callback, forceEventRead, initMa
                     },
                   ],
                   () => {
-                    async.parallel(
-                      [
-                        (callbackParallel2) => {
-                          this.displayMyTransactions(
-                            this.ordersResultByPair.orders,
-                            this.ordersResultByPair.blockNumber,
-                            () => {
-                              callbackParallel2(null, undefined);
-                            });
-                        },
-                        (callbackParallel2) => {
-                          this.displayOrderbook(this.ordersResultByPair.orders,
-                          this.ordersResultByPair.blockNumber, () => {
-                            callbackParallel2(null, undefined);
-                          });
-                        },
-                        (callbackParallel2) => {
-                          this.displayVolumes(this.topOrdersResult.orders,
-                          this.topOrdersResult.blockNumber, () => {
-                            callbackParallel2(null, undefined);
-                          });
-                        }],
-                      () => {
-                        callbackParallel(null, undefined);
-                      });
+                    console.log('Displaying order book', new Date());
+                    this.displayOrderbook(this.ordersResultByPair.orders,
+                    this.ordersResultByPair.blockNumber, () => {
+                      console.log('Done displaying order book', new Date());
+                      callbackParallel(null, undefined);
+                    });
                   });
               }],
             () => {
-              callbackSeries(null, undefined);
+              async.parallel(
+                [
+                  (callbackParallel3) => {
+                    console.log('Displaying volumes', new Date());
+                    this.displayVolumes(this.topOrdersResult.orders,
+                    this.returnTicker,
+                    this.topOrdersResult.blockNumber, () => {
+                      console.log('Done displaying volumes', new Date());
+                      callbackParallel3();
+                    });
+                  },
+                  (callbackParallel3) => {
+                    console.log('Displaying trades and chart', new Date());
+                    this.displayTradesAndChart(() => {
+                      console.log('Done displaying trades and chart', new Date());
+                      callbackParallel3();
+                    });
+                  },
+                  (callbackParallel3) => {
+                    console.log('Displaying my transactions', new Date());
+                    this.displayMyTransactions(
+                      this.ordersResultByPair.orders,
+                      this.ordersResultByPair.blockNumber,
+                      () => {
+                        console.log('Done displaying my transactions', new Date());
+                        callbackParallel3();
+                      });
+                  }],
+                () => {
+                  callbackSeries(null, undefined);
+                });
             });
         }],
       () => {
-        console.log('Ending refresh');
+        console.log('Ending refresh', new Date());
         done();
         callback();
       });
@@ -2271,7 +2296,7 @@ EtherDelta.prototype.refreshLoop = function refreshLoop() {
   const self = this;
   function loop() {
     self.refresh(() => {
-      setTimeout(loop, 10 * 1000);
+      setTimeout(loop, 60 * 1000);
     });
   }
   loop();
@@ -2296,6 +2321,7 @@ EtherDelta.prototype.loadWeb3 = function loadWeb3(callback) {
   if (typeof web3 !== 'undefined' && typeof Web3 !== 'undefined') {
     // metamask situation
     this.web3 = new Web3(web3.currentProvider);
+    console.log('Connecting to MetaMask', web3.currentProvider);
     async.until(
       () => this.connection,
       (callbackUntil) => {
@@ -2305,6 +2331,7 @@ EtherDelta.prototype.loadWeb3 = function loadWeb3(callback) {
           testnet: this.config.ethTestnet,
         };
         $('#pkDiv').hide();
+        $('#gasPrice').replaceWith('<p>Set in MetaMask</p>');
         setTimeout(() => {
           callbackUntil(null);
         }, 500);
@@ -2314,27 +2341,31 @@ EtherDelta.prototype.loadWeb3 = function loadWeb3(callback) {
       });
   } else if (typeof Web3 !== 'undefined' && window.location.protocol !== 'https:') {
     // mist/geth/parity situation
+    console.log('Connecting to Mist/Geth/Parity');
     this.web3 = new Web3(new Web3.providers.HttpProvider(this.config.ethProvider));
     try {
       this.connection = { connection: 'RPC', provider: this.config.ethProvider, testnet: this.config.ethTestnet };
       const coinbase = this.web3.eth.coinbase;
       console.log(`Coinbase: ${coinbase}`);
       $('#pkDiv').hide();
+      $('#gasPrice').replaceWith('<p>Set in MetaMask</p>');
     } catch (err) {
       this.connection = {
         connection: 'Proxy',
-        provider: `http://${this.config.ethTestnet ? 'testnet.' : ''}etherscan.io`,
+        provider: `https://${this.config.ethTestnet ? `${this.config.ethTestnet}.` : ''}etherscan.io`,
         testnet: this.config.ethTestnet,
       };
+      $('#gasPrice').val(this.config.ethGasPrice / 1000000000);
       this.web3.setProvider(undefined);
     }
     callback();
   } else {
     // etherscan proxy
+    console.log('Connecting to Etherscan proxy');
     this.web3 = new Web3();
     this.connection = {
       connection: 'Proxy',
-      provider: `http://${this.config.ethTestnet ? 'testnet.' : ''}etherscan.io`,
+      provider: `https://${this.config.ethTestnet ? `${this.config.ethTestnet}.` : ''}etherscan.io`,
       testnet: this.config.ethTestnet,
     };
     callback();
@@ -2342,10 +2373,16 @@ EtherDelta.prototype.loadWeb3 = function loadWeb3(callback) {
 };
 EtherDelta.prototype.initContracts = function initContracts(callback) {
   this.web3.version.getNetwork((error, version) => {
-    if (!error && version && Number(version) !== 1) {
-      this.alertError('You are connected to the Ethereum testnet. Please connect to the Ethereum mainnet.');
+    if (!error && version && Number(version) !== 1 && configName !== 'testnet') {
+      this.dialogError('You are connected to the Ethereum testnet. Please connect to the Ethereum mainnet.');
     }
     this.config = config;
+    this.minGas = (this.config.ethGasPrice * this.config.gasDeposit) / (10 ** 18);
+    if (Array.isArray(this.config.apiServer)) {
+      this.config.apiServer = this.config.apiServer[
+        Math.floor(Math.random() * this.config.apiServer.length)];
+      console.log('Selected API', this.config.apiServer);
+    }
     // default selected token and base
     this.selectedToken = this.config.tokens.find(
       x => x.name === this.config.defaultPair.token) || this.config.tokens[1];
@@ -2374,12 +2411,25 @@ EtherDelta.prototype.initContracts = function initContracts(callback) {
     // get accounts
     this.web3.eth.defaultAccount = this.config.ethAddr;
     this.web3.eth.getAccounts((e, accounts) => {
-      if (!e) {
+      if (!e && accounts && accounts.length > 0) {
         accounts.forEach((addr) => {
-          if (this.addrs.indexOf(addr) < 0) {
+          const index = this.addrs.indexOf(addr);
+          if (index < 0) {
             this.addrs.push(addr);
             this.pks.push(undefined);
           }
+        });
+        this.addrs.forEach((addr, i) => {
+          if (accounts.indexOf(addr) >= 0) {
+            this.addrKinds[i] = 'MetaMask';
+          }
+        });
+      } else if (this.connection.connection === 'RPC') {
+        this.dialogError('You are using MetaMask but you are not logged in. Please log in to MetaMask and refresh.');
+        ga('send', {
+          hitType: 'event',
+          eventCategory: 'Error',
+          eventAction: 'Ethereum - MetaMask not logged in',
         });
       }
     });
@@ -2430,10 +2480,13 @@ EtherDelta.prototype.initContracts = function initContracts(callback) {
   });
 };
 EtherDelta.prototype.startEtherDelta = function startEtherDelta() {
-  console.log('Beginning init');
+  console.log('Beginning init', new Date());
   this.loadWeb3(() => {
+    console.log('Web3 done', new Date());
     this.initContracts(() => {
+      console.log('Init contracts done', new Date());
       this.initDisplays(() => {
+        console.log('Displays done', new Date());
         this.refreshLoop();
       });
     });
