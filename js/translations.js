@@ -68,10 +68,28 @@ module.exports = {
     es: 'A ver las videos',
   },
   expires_explanation: {
-    en: 'The number of Ethereum blocks until the order automatically expires. 10000 = 1 day.',
-    cn: '直到订单自动过期的Etherem块的数量。 10000 = 1天。',
-    fr: 'Le nombre de blocs Ethereum jusqu\'à ce que l\'ordre expire automatiquement. 10000 = 1 jour.',
-    es: 'El número de bloques Ethereum hasta que el pedido expire automáticamente. 10000 = 1 día.',
+    en: 'The number of Ethereum blocks until the order automatically expires. (14 seconds per block.)',
+    cn: '直到订单自动过期的Etherem块的数量。 (每个块都是14秒。)',
+    fr: 'Le nombre de blocs Ethereum jusqu\'à ce que l\'ordre expire automatiquement. (Chaque bloc est de 14 secondes.)',
+    es: 'El número de bloques Ethereum hasta que el pedido expire automáticamente. (Cada bloque es de 14 segundos.)',
+  },
+  gas_price: {
+    en: 'Gas price',
+    cn: '气体价格',
+    fr: 'Prix de l\'essence',
+    es: 'Precio del gas',
+  },
+  gas_price_gwei: {
+    en: 'Gas price (gwei)',
+    cn: '气体价格 (gwei)',
+    fr: 'Prix de l\'essence (gwei)',
+    es: 'Precio del gas (gwei)',
+  },
+  set_gas_price: {
+    en: 'Set gas price',
+    cn: '气体价格',
+    fr: 'Prix de l\'essence',
+    es: 'Precio del gas',
   },
   FAQ: {
     en: 'FAQ',
@@ -104,11 +122,10 @@ module.exports = {
     es: 'Profundidad',
   },
   only_7_days: {
-    en: 'Note: EtherDelta will only show transactions from the last 7 days.',
-    cn: 'Note: EtherDelta 只会显示近7天的交易记录',
-    // cn:'Note: EtherDelta will only show transactions from the last 7 days.'
-    fr: 'Note: EtherDelta ne montrera que les 7 derniers jours de transactions.',
-    es: 'Nota Bene: EtherDelta sólo mostrará las transacciones de los últimos 7 días.',
+    en: 'Note: EtherDelta will only show recent transactions.',
+    cn: '注意：EtherDelta只会显示最近的交易。',
+    fr: 'Remarque: EtherDelta affichera uniquement les transactions récentes.',
+    es: 'Nota: EtherDelta sólo mostrará transacciones recientes.',
   },
 
   announcements: {
